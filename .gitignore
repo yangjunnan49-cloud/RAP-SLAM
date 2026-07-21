@@ -1,0 +1,13 @@
+# Dataset (download separately, see README and scripts/download_poss_segment.py)
+/data
+
+# Experiment outputs (regenerable via scripts/run_pipeline.py and eval scripts)
+/output*
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+.vscode/

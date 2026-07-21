@@ -1,0 +1,153 @@
+# RAP-SLAM
+
+以 **RAP**（Register Any Point，基于流匹配的多路点云全局配准模型）为配准引擎的**离线 / 非实时 SLAM 管线**。与 sibling 目录 `RAP-main`（上游 RAP 仓库，只读使用、不做任何修改）分离管理。
+
+```
+传感器数据 → [前端] 预处理 → KISS-ICP 里程计 → 关键帧筛选
+          → [回环] Scan Context 全局检索 + 邻近候选 → RAP 两路配准几何验证
+          → [后端] GTSAM 位姿图优化 → evo 评估 / 拼接地图
+```
+
+## 当前状态：N 路联合配准后端首轮对照完成 ✅（路线图第 4 项）
+
+### RAP N-way 联合全局配准 vs GTSAM PGO（POSS，2026-07-20）
+
+`rap_backend.register_multi()` 把一批关键帧一次性送入 RAP 联合配准（所有部件落在同一坐标系，约束天然环一致），三个批次对照：
+
+| 批次 | 内容 | N-way 布局（oracle SE(3) 对 GT 拟合残差） | 回环相对位姿误差 | Path A：N-way 约束 + PGO | Path B：直接锚定（无优化） |
+|---|---|---|---|---|---|
+| B1 | 5 个回环关键帧 ×4000 点 | **rmse 0.145 m** | 0.17–0.53 m / ≤1.1° | **1.736 m**（最优） | 8.37 m |
+| B2 | 7 个（B1+时序邻居）×4000 点 | rmse 0.153 m | 0.12–0.50 m / ≤1.7° | 1.781 m | 8.65 m |
+| B3 | 全部 82 关键帧 ×1500 点（12.3 万点，推理 38.6 s） | rmse 55.0 m（全局翘曲） | 0.21–0.49 m / ≤1.8° | 2.313 m | 98.2 m |
+
+基线：里程计 8.257 m，pairwise-PGO 1.821 m。
+
+**结论（首轮）**：
+1. **小规模回环批次的 N 路联合配准精度极高**——B1 的 5 个关键帧位姿本身中位误差仅 0.35 m，布局残差 0.145 m；
+2. **N 路约束喂给 PGO（Path A）优于独立两两配准约束**：1.736 vs 1.821 m（−4.7%），环一致性的价值得到验证；
+3. **一次性联合配准扩展到 82 帧时全局布局翘曲**（局部相对几何仍保持 0.2–0.5 m 精度）——全局一致性仍需 PGO 负责；
+4. Path B（直接锚定、无优化）失败原因有二：稀疏批次只修正批次关键帧、轨迹内部保持漂移（B1/B2 ≈ 里程计）；稠密批次受布局翘曲影响（B3）。
+5. RAP 采样是随机的，单次运行间存在 ±0.05 m 量级波动（B1 Path A 两次运行 1.79 / 1.74 m），后续需多种子评估。
+
+**定位**：RAP N 路目前最适合做"批次一致的回环约束工厂"喂给 PGO，而非替代 PGO；下一步是分层方案（回环簇内 N 路联合、簇间 PGO 缝合）。
+
+实验脚本：`scripts/eval_nway_backend.py`（产物 `output_nway/`，含 `accepted_loops.json`、`batch_*.npz` 缓存、`summary_nway.json`；`--reuse-cache` 可跳过重复推理）。
+
+### Scan Context 检索验证（POSS 序列，2026-07-20）
+
+- **检索精度**（82 个关键帧，GT 距离 < 3 m 且间隔 ≥ 200 帧为真回环）：SC 距离阈值 0.13–0.30 区间内 **precision = recall = 1.0**；真对 SC 距离 0.06 / 0.106，最近假对 0.347，间隔 3 倍以上
+- **抗漂移**：邻近检索半径收紧到 ≤ 10 m 时 recall 归零（回环处漂移 13.3 m）；SC 不依赖里程计，照常全部命中
+- **端到端对照**（`--loop-dist 5`）：proximity-only 0 候选、APE 停在 8.26 m；`--loop-method both` 下 SC 单独捞出 2 对真回环，RAP 2/2 验收（对 GT 误差 0.15 / 0.34 m），PGO 后 **APE 1.90 m**
+- **开销**：82 帧描述子构建 0.2 s，654 对匹配 0.6 s，相对 RAP 验证可忽略
+- 评估脚本：`scripts/eval_loop_retrieval.py`（复用 `output_poss/odom_poses.txt`，无需重跑里程计）；对照产物 `output_poss_prox5/`、`output_poss_sc5/`
+
+### 真实序列结果（POSS 校园数据集，帧 3850–5268）
+
+- **数据**：北大 POSS odometry 数据集（Velodyne-32e，KITTI 同格式，CC BY-NC-SA 3.0），1419 帧真实扫描，路径 413 m，每帧约 6.2 万点，首尾回环（GT 间距 0.08 m）
+- **里程计**（KISS-ICP，deskew 关闭）：APE RMSE 8.26 m（约 2% 漂移）
+- **回环**：候选 4 对全部命中真实回环，**RAP 验证精度 0.15–0.47 m / 0.0°**（对 GT），重叠率 0.75–0.88
+- **PGO 优化后**：**APE RMSE 1.82 m（↓ 78%）**，max 3.80 m；GTSAM 3 次迭代收敛
+- **耗时**：全程 67.9 s（RTX 5070；里程计 40.5 s，RAP 验证 4 次共 9.2 s，每次约 0.5–1 s）
+
+| 指标 | 纯里程计 | PGO 优化后 | 变化 |
+|---|---|---|---|
+| APE RMSE | 8.26 m | **1.82 m** | ↓ 78.0% |
+| APE max | 13.32 m | 3.80 m | ↓ 71.4% |
+
+结果产物：`output_poss/trajectory_plot.png`、`output_poss/summary.json`、`output_poss/merged_map_*.ply`
+
+### 模拟序列基线（KITTI-00 整图模拟闭环）
+
+- 101 帧模拟扫描，APE RMSE 5.53 m → 3.67 m（↓ 33.7%），产物在 `output/`。用于管线逻辑冒烟测试。
+
+### 真实序列踩过的两个关键坑（已修复）
+
+1. **GT 坐标系约定**：POSS 的位姿**已经是** LiDAR/world 系（轨迹水平、z-up），不能再套 KITTI 的 `Tr @ T @ Tr⁻¹` 相机系变换——否则轨迹被旋转成立面，评估全错。`real_dataset.load_gt_poses(apply_calib=...)` 控制，KITTI 用 True，POSS 用 False。
+2. **回环验收逻辑自相矛盾**：原逻辑要求 RAP 结果与（已漂移的）里程计一致（< 5 m）才接受——但回环存在的意义就是修正漂移，真实回环在漂移下必然"不一致"（实测漂移 13.3 m，RAP 对 GT 误差仅 0.15–0.47 m）。现改为以 RAP 内在几何质量（重叠率）验收，一致性仅作诊断日志。
+
+## 数据获取（POSS，国内服务器速度快）
+
+位姿/标定小文件直接下载；雷达数据从 24 GB 官方 zip 用 HTTP Range 按需抽取单段（约 1.4 GB / 4 分钟）：
+
+```bash
+# 位姿 + 标定（约 3 MB）
+curl -O http://www.poss.pku.edu.cn/OpenDataResource/poss_odomotry/data_odometry_poses.zip
+curl -O http://www.poss.pku.edu.cn/OpenDataResource/poss_odomotry/data_odometry_calib.zip
+# 雷达帧段（断点续传，已下载的自动跳过）
+python scripts/download_poss_segment.py --start 3850 --end 5268 --threads 4
+```
+
+## 运行方法（WSL2）
+
+```bash
+wsl -d Ubuntu-24.04
+source /root/miniconda3/bin/activate rap-inference
+cd /mnt/e/githouse/RAP-SLAM
+
+# 真实序列（POSS）
+python scripts/run_pipeline.py --source real --output ./output_poss --loop-sep 200
+
+# 模拟序列（默认）
+python scripts/run_pipeline.py --output ./output
+```
+
+真实序列参数：`--real-root`（默认 data/poss）、`--real-start/--real-end`（帧段）、`--real-stride`（抽帧）、`--real-apply-calib`（KITTI 约定时启用）、`--odom-max-range`。
+
+回环检索参数：`--loop-method {proximity,sc,both}`（默认 both）、`--sc-dist-thresh`（默认 0.25，POSS 上 0.13–0.30 均 P=R=1.0）、`--sc-rings/--sc-sectors`（20×60）、`--sc-max-radius`（80 m）、`--sc-shortlist`（ring-key 粗筛数，默认 10）。
+
+## 目录结构
+
+```
+RAP-SLAM/
+├── README.md
+├── requirements.txt          # kiss-icp / gtsam / evo（装入 rap-inference conda 环境）
+├── rap_slam/
+│   ├── sequence.py           # 模拟扫描序列（真实整图 + 虚拟轨迹）
+│   ├── real_dataset.py       # KITTI 格式真实序列加载（KITTI odometry / POSS）
+│   ├── odometry.py           # KISS-ICP 逐帧里程计（Open3D ICP 兜底）
+│   ├── keyframes.py          # 按位移/旋转阈值筛选关键帧
+│   ├── scan_context.py       # Scan Context 全局位置识别（ring-key 粗筛 + 列移匹配）
+│   ├── rap_backend.py        # RAP 模型进程内封装（register 两路 / register_multi N 路联合配准）
+│   ├── loop_closure.py       # 邻近/SC 候选合并 + RAP 几何验证（重叠率验收）
+│   ├── pose_graph.py         # GTSAM 位姿图优化
+│   └── evaluate.py           # evo APE/RPE + 轨迹图 + 拼接地图
+├── scripts/
+│   ├── run_pipeline.py       # 唯一入口：六阶段一键运行
+│   ├── eval_loop_retrieval.py    # 回环检索 precision/recall 评估（对照 GT）
+│   ├── eval_nway_backend.py  # RAP N 路联合配准后端 vs PGO 对照实验
+│   ├── download_poss_segment.py  # POSS 雷达段 Range 抽取下载器
+│   ├── test_rap_backend.py   # RAP 封装单元测试
+│   └── _*.py / sweep_*.py    # 开发期调试/参数扫描脚本（非正式产物）
+├── data/
+│   ├── poss/dataset/...      # POSS 位姿、标定、1419 帧 velodyne
+│   └── kitti/dataset/...     # KITTI 位姿 + 标定（全 22 序列，雷达未下载）
+├── output/                   # 模拟序列结果
+├── output_poss/              # 真实序列结果（proximity 检索）
+├── output_poss_sc/           # 真实序列结果（both：SC + 邻近合并，复现 1.82 m）
+├── output_poss_prox5/        # 抗漂移对照：proximity-only @5 m（0 回环，8.26 m）
+├── output_poss_sc5/          # 抗漂移实验：both @5 m（SC 捞出 2 回环，1.90 m）
+└── output_nway/              # N 路后端实验（accepted_loops.json、batch_*.npz、summary_nway.json）
+```
+
+## RAP 集成方式（rap_backend.py）
+
+- 通过 `sys.path` 只读导入 `RAP-main`，Hydra 组合 `RAP_inference` 配置（`rap_12`，5 步 Euler），加载 `weights/rap_model_12.ckpt`，**模型全程只加载一次**。
+- 预处理完全复刻 `demo.py`：体素降采样 → 统计去离群 → miniSpinNet 32-D 特征 → 与 `PointCloudDataset._transform()` 一致的归一化。
+- `register(points_a, points_b)` 返回 `T_rel = T_a⁻¹ @ T_b`（b 在 a 坐标系下的位姿），与 GTSAM `BetweenFactor` 约定一致。
+
+## 已知限制
+
+- ~~回环候选依赖里程计邻近检索~~ → 已由 Scan Context 全局检索解决（2026-07-20）；KITTI seq06 / 多序列下的 SC 阈值泛化仍待验证。
+- KISS-ICP 未开 deskew（POSS bin 无点级时间戳）；户外 32 线数据上 2% 漂移，开 deskew 或换 LIO 可进一步降低。
+- ~~RAP 验证为两路配准~~ → N 路联合配准已接入（2026-07-20）：小批次（5–7 帧）环一致约束优于 pairwise-PGO；但一次性 82 帧联合配准全局布局翘曲，尚不能替代 PGO，待分层方案。
+- PGO 中回环边的信息矩阵为固定值，未按 RAP 重叠率/拟合残差自适应加权。
+- 真实验证目前只有单段（POSS 413 m 校园闭环）；尚未在多数据集（KITTI/MCD/Livox）上做泛化验证。
+
+## 路线图
+
+1. ~~阶段一：纯 Python 离线管线最小闭环（模拟序列）~~ ✅
+2. ~~真实 LiDAR 序列验证（POSS 校园闭环，APE 8.26→1.82 m）~~ ✅
+3. ~~Scan Context 全局回环检索~~ ✅（2026-07-20，POSS 上 P=R=1.0，抗 13.3 m 漂移）+ 多数据集泛化（KITTI seq06 数据已可抽取，受网速限制暂缓）
+4. ~~RAP N 路联合配准后端首轮对照~~ ✅（2026-07-20：小批次环一致约束优于 pairwise-PGO 4.7%（1.74 vs 1.82 m）；82 帧一次性配准全局翘曲 55 m）→ 迭代方向：分层 N 路（回环簇内联合 + 簇间 PGO 缝合）、多种子方差评估
+5. 阶段二：ROS 2 (Jazzy) 节点化 + RViz 可视化
+
