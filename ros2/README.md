@@ -54,6 +54,9 @@ Player parameters: `data_dir` (default: POSS seq 00 velodyne dir), `topic`
   visible window). If a window is lost: focus it via the taskbar, then
   `Win+←` / `Win+→` to snap it back (or `Alt+Space` → `M` → arrow key → move
   the mouse). The shipped `rap_slam.rviz` deliberately omits geometry state.
+  If the window is invisible even on a fresh launch (WSLg + OGRE presentation
+  bug), relaunch with software rendering:
+  `RVIZ_SOFTWARE=1 bash run_step1.sh --ros-args -p loop:=true`
 - Headless check (no GUI): run the player, then
   `ros2 topic hz /points_raw` / `ros2 topic echo --once --field width /points_raw`.
 

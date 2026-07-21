@@ -15,5 +15,11 @@ PLAYER_PID=$!
 trap 'kill "$PLAYER_PID" 2>/dev/null || true' EXIT
 
 sleep 2
+# RVIZ_SOFTWARE=1 forces Mesa llvmpipe rendering. Use it when the RViz window
+# is invisible/blank under WSLg (taskbar icon present but no window shown).
+if [ "${RVIZ_SOFTWARE:-0}" = "1" ]; then
+  export LIBGL_ALWAYS_SOFTWARE=1
+  echo "RVIZ_SOFTWARE=1 -> software OpenGL (llvmpipe), slower but robust"
+fi
 echo "Starting RViz (needs WSLg). Fixed frame: velodyne, topic: /points_raw"
 rviz2 -d "$SCRIPT_DIR/rviz/rap_slam.rviz"
