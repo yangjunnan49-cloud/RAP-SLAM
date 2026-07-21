@@ -48,6 +48,12 @@ Player parameters: `data_dir` (default: POSS seq 00 velodyne dir), `topic`
   BestEffort too, or the display stays silently empty.
 - **Never `source /opt/ros/jazzy/setup.bash` under `set -u`** — it references
   unbound variables. `install_ros2_jazzy.sh` handles this internally.
+- **WSLg window quirks:** do not hand-write `Window Geometry` /
+  `QMainWindow State` blobs into `.rviz` configs — a stale/invalid state can
+  leave the RViz window off-screen or zero-sized (taskbar icon present, no
+  visible window). If a window is lost: focus it via the taskbar, then
+  `Win+←` / `Win+→` to snap it back (or `Alt+Space` → `M` → arrow key → move
+  the mouse). The shipped `rap_slam.rviz` deliberately omits geometry state.
 - Headless check (no GUI): run the player, then
   `ros2 topic hz /points_raw` / `ros2 topic echo --once --field width /points_raw`.
 
