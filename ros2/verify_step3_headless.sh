@@ -31,7 +31,8 @@ source /opt/ros/jazzy/setup.bash
 END=$((3850 + N - 1))
 
 rm -f "$SAVE_DIR/accepted_loops.json" "$SAVE_DIR/keyframes.json" \
-      "$SAVE_DIR/map_poses.txt" "$LOG_DIR/live_poses_step3.txt" \
+      "$SAVE_DIR/map_poses.txt" "$SAVE_DIR/merged_map_live.ply" \
+      "$LOG_DIR/live_poses_step3.txt" \
       "$LOG_DIR/rap_server.log" "$LOG_DIR/odom_node.log" \
       "$LOG_DIR/loop_node.log" "$LOG_DIR/player.log"
 
@@ -86,6 +87,9 @@ kill "$(pgrep -f loop_closure_node.py)" 2>/dev/null || true
 sleep 3
 kill "${PIDS[@]}" 2>/dev/null || true
 sleep 1
+
+grep -q "map published" "$LOG_DIR/loop_node.log" || {
+  echo "FAIL: /map_cloud was never published"; exit 1; }
 
 # Evaluate with the conda python (evo + the offline GT loader).
 "$CONDA_PY" - "$SAVE_DIR" "$LOG_DIR/live_poses_step3.txt" "$REPO_ROOT" "$N" <<'EOF'
@@ -160,6 +164,17 @@ else:
         failures.append(f"PGO APE too high: {m_opt['ape_rmse']:.3f}")
     if m_opt["ape_rmse"] >= m_odom["ape_rmse"]:
         failures.append("PGO did not improve over odometry")
+
+ply_file = os.path.join(save_dir, "merged_map_live.ply")
+if not os.path.exists(ply_file):
+    failures.append("merged_map_live.ply missing (map never built)")
+else:
+    with open(ply_file, "rb") as f:
+        head = f.read(300).decode("ascii", errors="replace")
+    n_pts = int(head.split("element vertex")[1].split()[0])
+    print(f"merged map: {n_pts} points in merged_map_live.ply")
+    if n_pts < 50000:
+        failures.append(f"merged map too small: {n_pts} points")
 
 if failures:
     print("FAIL: " + "; ".join(failures))

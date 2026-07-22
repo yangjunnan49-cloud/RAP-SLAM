@@ -117,8 +117,12 @@ Architecture (two interpreters, one localhost socket):
 
 Outputs: TF `map -> odom` correction (10 Hz, identity until the first loop),
 `/map_path` (nav_msgs/Path, map frame, PGO-corrected trajectory),
-`/loop_edges` (visualization_msgs/Marker LINE_LIST, cyan, map frame).
-Path/marker publishers are TRANSIENT_LOCAL so RViz shows the latest state
+`/loop_edges` (visualization_msgs/Marker LINE_LIST, cyan, map frame),
+`/map_cloud` (sensor_msgs/PointCloud2, map frame — accumulated map rebuilt
+from stride-downsampled scans at their latest corrected poses after every PGO
+and every `map_period` scans; `map_voxel` 0.3 m, `map_stride` 5,
+`map_max_points` 500000).
+Path/marker/map publishers are TRANSIENT_LOCAL so RViz shows the latest state
 whenever it (re)starts.
 
 Run the demo:
@@ -138,7 +142,9 @@ bash /mnt/e/githouse/RAP-SLAM/ros2/verify_step3_headless.sh 1419 12
 # loops (0,1394) overlap 0.76 + (0,1415) overlap 0.86,
 # live odometry APE 8.257 m (= offline), live PGO APE 1.757 m
 # (offline batch: 1.821 m with 4 loops; live accepts the 2 streaming-
-# reachable ones — j=1418 pairs need the batch-only "last scan" keyframe)
+# reachable ones — j=1418 pairs need the batch-only "last scan" keyframe),
+# merged map 500k points rebuilt per PGO (~0.17 s), saved as
+# output_ros2/step3/merged_map_live.ply
 ```
 
 ## Notes / gotchas

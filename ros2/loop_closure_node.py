@@ -16,6 +16,9 @@ Topics / frames:
     sub  /odom         (nav_msgs/Odometry from odometry_node.py)
     pub  /map_path     (nav_msgs/Path, map frame — PGO-corrected trajectory)
     pub  /loop_edges   (visualization_msgs/Marker LINE_LIST, map frame)
+    pub  /map_cloud    (sensor_msgs/PointCloud2, map frame — accumulated map,
+                        rebuilt from stored scans at their latest corrected
+                        poses after every PGO and every map_period scans)
     TF   map -> odom (dynamic correction; identity until the first accepted loop)
 
 Frames chain: map -> odom -> base_link -> velodyne.
@@ -113,6 +116,47 @@ def _rotation_error_deg(R: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
 
 
+def voxel_downsample(points: np.ndarray, voxel: float) -> np.ndarray:
+    """NumPy voxel downsample: keep the first point landing in each voxel."""
+    if voxel <= 0 or len(points) == 0:
+        return points
+    keys = np.floor(points / voxel).astype(np.int64)
+    _, idx = np.unique(keys, axis=0, return_index=True)
+    return points[np.sort(idx)]
+
+
+def xyz_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud2:
+    """Build a dense xyz float32 PointCloud2 without the slow .tolist() path
+    (matters at ~1e5-1e6 points; create_cloud(tolist()) capped the player)."""
+    from sensor_msgs.msg import PointField
+    pts = np.ascontiguousarray(points, dtype=np.float32)
+    msg = PointCloud2()
+    msg.header.frame_id = frame_id
+    msg.header.stamp = stamp
+    msg.height = 1
+    msg.width = len(pts)
+    msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32,
+                             count=1) for i, n in enumerate("xyz")]
+    msg.is_bigendian = False
+    msg.point_step = 12
+    msg.row_step = 12 * len(pts)
+    msg.data = pts.tobytes()
+    msg.is_dense = True
+    return msg
+
+
+def write_ply_xyz(path: str, points: np.ndarray) -> None:
+    """Minimal binary-little-endian PLY (x y z float), no open3d needed."""
+    pts = np.ascontiguousarray(points, dtype=np.float32)
+    header = ("ply\nformat binary_little_endian 1.0\n"
+              f"element vertex {len(pts)}\n"
+              "property float x\nproperty float y\nproperty float z\n"
+              "end_header\n")
+    with open(path, "wb") as f:
+        f.write(header.encode("ascii"))
+        f.write(pts.tobytes())
+
+
 def _recv_msg(conn: socket.socket):
     header = b""
     while len(header) < 8:
@@ -186,6 +230,11 @@ class LoopClosureNode(Node):
         self.declare_parameter("max_per_kf", 3)      # candidate budget per keyframe
         self.declare_parameter("max_total", 16)      # total verification budget
         self.declare_parameter("save_dir", "")
+        # Accumulated-map publication (/map_cloud):
+        self.declare_parameter("map_voxel", 0.3)     # per-scan pre-downsample (m)
+        self.declare_parameter("map_stride", 5)      # keep every k-th scan
+        self.declare_parameter("map_max_points", 500000)
+        self.declare_parameter("map_period", 200)    # scans between map republishes
 
         gp = self.get_parameter
         self.map_frame = gp("map_frame").value
@@ -201,6 +250,10 @@ class LoopClosureNode(Node):
         self.max_per_kf = int(gp("max_per_kf").value)
         self.max_total = int(gp("max_total").value)
         self.save_dir = str(gp("save_dir").value)
+        self.map_voxel = float(gp("map_voxel").value)
+        self.map_stride = max(1, int(gp("map_stride").value))
+        self.map_max_points = int(gp("map_max_points").value)
+        self.map_period = int(gp("map_period").value)
 
         # --- trajectory state (spin thread appends; worker reads snapshots) ---
         self.poses = []        # odom 4x4 per scan, arrival order == offline index
@@ -228,6 +281,10 @@ class LoopClosureNode(Node):
         self._verified = 0
         self._stop = threading.Event()
 
+        # --- accumulated map state (sensor-frame downsampled clouds) ---
+        self._map_scans = []      # list of (scan_idx, (N,3) float32)
+        self._map_request = False  # worker picks this up and republishes
+
         sub_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.VOLATILE, depth=50)
         odom_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -240,6 +297,7 @@ class LoopClosureNode(Node):
                              durability=DurabilityPolicy.TRANSIENT_LOCAL, depth=1)
         self.path_pub = self.create_publisher(Path, "/map_path", out_qos)
         self.marker_pub = self.create_publisher(Marker, "/loop_edges", out_qos)
+        self.map_pub = self.create_publisher(PointCloud2, "/map_cloud", out_qos)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.create_timer(0.1, self._publish_correction_tf)   # 10 Hz map->odom
         self.create_timer(1.0, self._republish_path)          # keep path fresh
@@ -302,8 +360,15 @@ class LoopClosureNode(Node):
                 self._acc_trans = 0.0
                 self._acc_rot = 0.0
 
+        need_cloud = is_kf or (idx % self.map_stride == 0)
+        xyz = cloud_to_xyz(cloud_msg) if need_cloud else None
+
+        if idx % self.map_stride == 0:
+            self._map_scans.append((idx, voxel_downsample(xyz, self.map_voxel)))
+            if self.map_period > 0 and idx > 0 and idx % self.map_period < self.map_stride:
+                self._map_request = True  # worker republishes /map_cloud
+
         if is_kf:
-            xyz = cloud_to_xyz(cloud_msg)
             self.keyframes.append(idx)
             self.kf_scans[idx] = xyz
             sc = sc_mod.make_scan_context(xyz, max_radius=self.sc_max_radius)
@@ -378,8 +443,11 @@ class LoopClosureNode(Node):
                 i, j = self._queue.get(timeout=0.5)
             except queue.Empty:
                 if pgo_pending:
-                    self._run_pgo(client)
+                    self._run_pgo(client)  # also republishes the map
                     pgo_pending = False
+                elif self._map_request:
+                    self._map_request = False
+                    self._publish_map()
                 elif was_busy:
                     was_busy = False
                     self.get_logger().info(
@@ -452,6 +520,7 @@ class LoopClosureNode(Node):
             f"{time.time() - t0:.2f} s — trajectory corrected")
         self._publish_map_path()
         self._publish_loop_marker()
+        self._publish_map()
 
     # ------------------------------------------------------------------
     # Publishers
@@ -507,6 +576,35 @@ class LoopClosureNode(Node):
         if self.optimized is not None:
             self._publish_map_path()
 
+    def _build_map_cloud(self) -> np.ndarray:
+        """Merge the stored scans at their latest corrected poses (map frame)."""
+        corrected = self._corrected_trajectory()
+        chunks = []
+        for idx, pts in self._map_scans:
+            if idx >= len(corrected) or len(pts) == 0:
+                continue
+            T = corrected[idx]
+            chunks.append((T[:3, :3] @ pts.T).T + T[:3, 3])
+        if not chunks:
+            return np.zeros((0, 3), dtype=np.float32)
+        merged = np.concatenate(chunks).astype(np.float32)
+        if len(merged) > self.map_max_points:
+            rng = np.random.default_rng(0)
+            sel = rng.choice(len(merged), self.map_max_points, replace=False)
+            merged = merged[sel]
+        return merged
+
+    def _publish_map(self):
+        t0 = time.time()
+        merged = self._build_map_cloud()
+        if len(merged) == 0:
+            return
+        self.map_pub.publish(xyz_to_pointcloud2(
+            merged, self.map_frame, self.get_clock().now().to_msg()))
+        self.get_logger().info(
+            f"map published: {len(merged)} points from {len(self._map_scans)} "
+            f"scans ({time.time() - t0:.2f} s)")
+
     def _publish_loop_marker(self):
         m = Marker()
         m.header.frame_id = self.map_frame
@@ -546,9 +644,13 @@ class LoopClosureNode(Node):
                     t = T[:3, 3]
                     f.write(f"{s:.6f} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} "
                             f"{qx:.8f} {qy:.8f} {qz:.8f} {qw:.8f}\n")
+            merged = self._build_map_cloud()
+            if len(merged) > 0:
+                write_ply_xyz(os.path.join(self.save_dir, "merged_map_live.ply"),
+                              merged)
             self.get_logger().info(
                 f"Saved {len(self.loops)} loops + {len(corrected)} corrected "
-                f"poses to {self.save_dir}")
+                f"poses + {len(merged)} map points to {self.save_dir}")
         super().destroy_node()
 
 
