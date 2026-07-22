@@ -62,7 +62,7 @@
 
 ### 真实序列踩过的两个关键坑（已修复）
 
-1. **GT 坐标系约定**：POSS 的位姿**已经是** LiDAR/world 系（轨迹水平、z-up），不能再套 KITTI 的 `Tr @ T @ Tr⁻¹` 相机系变换——否则轨迹被旋转成立面，评估全错。`real_dataset.load_gt_poses(apply_calib=...)` 控制，KITTI 用 True，POSS 用 False。
+1. **GT 坐标系约定**：POSS 的位姿**已经是** LiDAR/world 系（轨迹水平、z-up），不能再套 KITTI 的相机系变换——否则轨迹被旋转成立面，评估全错。`real_dataset.load_gt_poses(apply_calib=...)` 控制，KITTI 用 True，POSS 用 False。**KITTI 转换方向已于 2026-07-22 修正**：正确公式是 `T_velo = Tr⁻¹ @ T_cam @ Tr`（此前误用 `Tr @ T @ Tr⁻¹`，GT 世界系被转约 90°，KITTI 04"里程计 APE"高达 310.7 m，修复后 2.96 m；该 bug 因一直无 KITTI 雷达数据而潜伏未暴露）。
 2. **回环验收逻辑自相矛盾**：原逻辑要求 RAP 结果与（已漂移的）里程计一致（< 5 m）才接受——但回环存在的意义就是修正漂移，真实回环在漂移下必然"不一致"（实测漂移 13.3 m，RAP 对 GT 误差仅 0.15–0.47 m）。现改为以 RAP 内在几何质量（重叠率）验收，一致性仅作诊断日志。
 
 ## 数据获取（POSS，国内服务器速度快）
@@ -120,7 +120,9 @@ RAP-SLAM/
 │   └── _*.py / sweep_*.py    # 开发期调试/参数扫描脚本（非正式产物）
 ├── data/
 │   ├── poss/dataset/...      # POSS 位姿、标定、1419 帧 velodyne
-│   └── kitti/dataset/...     # KITTI 位姿 + 标定（全 22 序列，雷达未下载）
+│   └── kitti/dataset/...     # KITTI 位姿 + 标定（全 22 序列）；velodyne 扫描
+│                             #   在 E:\githouse\Datasets\data_odometry_velodyne
+│                             #   （seq 01–04 完整，已组装 poses/calib/times，可直接作 --real-root）
 ├── output/                   # 模拟序列结果
 ├── output_poss/              # 真实序列结果（proximity 检索）
 ├── output_poss_sc/           # 真实序列结果（both：SC + 邻近合并，复现 1.82 m）

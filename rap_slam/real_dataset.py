@@ -38,7 +38,7 @@ def load_gt_poses(poses_file: str, calib_file: str,
     Args:
         apply_calib: when True (KITTI convention, poses are the camera
             trajectory), convert to the velodyne frame via
-            T_velo_i = Tr @ T_cam_i @ Tr^-1. When False, poses are already in
+            T_velo_i = Tr^-1 @ T_cam_i @ Tr. When False, poses are already in
             the LiDAR/world frame and used as-is (POSS convention — verified:
             the raw POSS pose trajectory is z-up horizontal; applying the
             calib similarity would stand it upright).
@@ -51,7 +51,11 @@ def load_gt_poses(poses_file: str, calib_file: str,
     if apply_calib:
         Tr = _read_calib_transform(calib_file)
         Tr_inv = np.linalg.inv(Tr)
-        poses = np.stack([Tr @ T @ Tr_inv for T in poses])
+        # Camera-trajectory -> velodyne-trajectory (world becomes velo_0).
+        # NOTE: the inverse order (Tr @ T @ Tr^-1) is WRONG here — it leaves
+        # the trajectory in a ~90-deg-rotated world frame (verified on KITTI
+        # seq 04: APE mean 267 m vs 2.1 m after the fix).
+        poses = np.stack([Tr_inv @ T @ Tr for T in poses])
     end_idx = len(poses) - 1 if end is None else end
     return poses[start:end_idx + 1]
 
