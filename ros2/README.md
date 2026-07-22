@@ -1,9 +1,12 @@
 # RAP-SLAM — ROS 2 / RViz visualization (Phase 2)
 
-Step 0–2 of the ROS 2 roadmap: Jazzy environment on WSL2 Ubuntu 24.04,
+Step 0–3 of the ROS 2 roadmap: Jazzy environment on WSL2 Ubuntu 24.04,
 a standalone player node that streams KITTI/POSS `.bin` scans as
-`sensor_msgs/PointCloud2`, and a KISS-ICP odometry node publishing
-`nav_msgs/Odometry` + TF + `nav_msgs/Path` for live trajectory viewing.
+`sensor_msgs/PointCloud2`, a KISS-ICP odometry node publishing
+`nav_msgs/Odometry` + TF + `nav_msgs/Path`, and a loop-closure + PGO stack
+(Scan Context / proximity candidates -> RAP verification -> GTSAM PGO)
+publishing the `map -> odom` correction TF, a corrected `/map_path`, and
+`/loop_edges` markers.
 
 ## Layout
 
@@ -13,13 +16,23 @@ a standalone player node that streams KITTI/POSS `.bin` scans as
 - `pointcloud_player.py` — standalone rclpy node (no colcon build needed).
 - `odometry_node.py` — KISS-ICP odometry node (Step 2). Reuses
   `rap_slam.odometry.KissOdometry` with the offline pipeline's parameters.
-- `rviz/rap_slam.rviz` — RViz layout: grid + PointCloud2 on `/points_raw` +
-  Path on `/odom_path`, fixed frame `odom`, orbit view.
+- `rap_server.py` — GPU worker (Step 3): loads RAP + GTSAM once in the conda
+  env and serves registration / PGO requests over a localhost TCP socket
+  (length-prefixed pickle). NOT a ROS node — see the Step-3 section.
+- `loop_closure_node.py` — loop-closure + PGO node (Step 3): streaming
+  keyframe selection, Scan Context + proximity candidates, RAP verification
+  via `rap_server.py`, GTSAM PGO, `map -> odom` correction TF.
+- `rviz/rap_slam.rviz` — Step 1/2 layout (fixed frame `odom`).
+- `rviz/rap_slam_step3.rviz` — Step 3 layout (fixed frame `map`, adds the
+  `/map_path` and `/loop_edges` displays).
 - `run_step1.sh` — player + RViz only.
-- `run_step2.sh` — player + odometry node + RViz (the full live demo).
-- `verify_step2_headless.sh` — no-GUI regression check: plays a POSS segment
-  through both nodes and diffs the live trajectory against
+- `run_step2.sh` — player + odometry node + RViz.
+- `run_step3.sh` — rap_server + odometry + loop-closure + player + RViz
+  (the full live SLAM demo).
+- `verify_step2_headless.sh` — no-GUI regression: live odometry vs
   `../output_poss/odom_poses.txt`.
+- `verify_step3_headless.sh` — no-GUI regression: full live loop-closure
+  pipeline vs ground truth (APE before/after PGO).
 
 ## Step 0 — install + verify DDS
 
@@ -86,6 +99,48 @@ Verified 2026-07-21 (WSL2): full 1419-frame POSS segment, live trajectory
 numerically identical to the offline pipeline (max diff 1e-6 m); KISS-ICP
 registration 18–45 ms/scan, real-time at the native 10 Hz playback.
 
+## Step 3 — live loop closure + PGO
+
+Architecture (two interpreters, one localhost socket):
+
+- `rap_server.py` runs in the **conda env** (`rap-inference`, torch/CUDA):
+  loads `RAPBackend` once and serves `register` (2-way RAP verification) and
+  `pgo` (GTSAM optimization) requests over TCP `127.0.0.1:5557`,
+  length-prefixed pickle. Not a ROS node.
+- `loop_closure_node.py` runs in the **system python3** (rclpy): pairs
+  `/points_raw` + `/odom` by stamp, streaming keyframe selection (same
+  thresholds as the offline pipeline: 6 m / 12 deg), Scan Context descriptors
+  per keyframe, proximity + SC candidates (same params as the offline POSS
+  run: sep 200, dist 15 m, SC < 0.25), RAP verification in a worker thread
+  (acceptance on overlap >= 0.25 only — never gate on odometry consistency),
+  GTSAM PGO after each accepted loop.
+
+Outputs: TF `map -> odom` correction (10 Hz, identity until the first loop),
+`/map_path` (nav_msgs/Path, map frame, PGO-corrected trajectory),
+`/loop_edges` (visualization_msgs/Marker LINE_LIST, cyan, map frame).
+Path/marker publishers are TRANSIENT_LOCAL so RViz shows the latest state
+whenever it (re)starts.
+
+Run the demo:
+
+```bash
+bash /mnt/e/githouse/RAP-SLAM/ros2/run_step3.sh
+bash run_step3.sh --ros-args -p rate:=5.0 -p loop:=true    # args -> player
+LOOP_ARGS="--ros-args -p loop_sep:=100" bash run_step3.sh  # args -> loop node
+SERVER_ARGS="--port 5558" bash run_step3.sh                # args -> rap_server
+```
+
+Headless verification (full POSS segment, ~4 min at 12 Hz playback):
+
+```bash
+bash /mnt/e/githouse/RAP-SLAM/ros2/verify_step3_headless.sh 1419 12
+# PASS example (2026-07-22, WSL2): 1419/1419 frames,
+# loops (0,1394) overlap 0.76 + (0,1415) overlap 0.86,
+# live odometry APE 8.257 m (= offline), live PGO APE 1.757 m
+# (offline batch: 1.821 m with 4 loops; live accepts the 2 streaming-
+# reachable ones — j=1418 pairs need the batch-only "last scan" keyframe)
+```
+
 ## Notes / gotchas
 
 - **Effective rate tops out around 10 Hz.** The version-proof `.tolist()`
@@ -121,11 +176,15 @@ registration 18–45 ms/scan, real-time at the native 10 Hz playback.
   import time varies). `verify_step2_headless.sh` shows the pattern.
 - **Do not keep state in WSL `/tmp` across `wsl` invocations** — it can be
   wiped when the VM restarts. Use a repo dir (e.g. `output_ros2/`) or `/mnt/e`.
+- **rclpy parameter typing is strict:** the player's `rate` is declared
+  double, so `--ros-args -p rate:=15` fails with InvalidParameterTypeException
+  (INTEGER vs DOUBLE). Always pass a decimal: `-p rate:=15.0`.
+- **`pkill -f` self-match:** `pkill -f 'odometry_node.py|...'` inside
+  `wsl bash -c "..."` kills the invoking shell itself (the pattern appears in
+  its own command line), silently aborting the rest of the command. Use the
+  bracket trick (`pkill -f 'odometry_[n]ode.py'`) or separate calls.
+- **Playback headroom:** KISS-ICP registration grows to ~60 ms/scan late in
+  the POSS segment; at 15 Hz playback (66 ms budget) the odometry node is one
+  hiccup from dropping frames. Use 10–12 Hz for full-segment runs.
 - Headless check (no GUI): run the player, then
   `ros2 topic hz /points_raw` / `ros2 topic echo --once --field width /points_raw`.
-
-## Next
-
-Step 3 — loop-closure + PGO nodes: Scan Context / proximity candidates, RAP
-verification, GTSAM optimization, `map → odom` correction TF, and loop-edge
-markers in RViz.
