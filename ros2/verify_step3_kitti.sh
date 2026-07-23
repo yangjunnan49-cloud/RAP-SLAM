@@ -41,9 +41,11 @@ case "$RATE" in *.*) ;; *) RATE="$RATE.0" ;; esac
 KITTI_ROOT=/mnt/e/githouse/Datasets/data_odometry_velodyne/dataset
 DATA_DIR="$KITTI_ROOT/sequences/$SEQ/velodyne"
 OUT_DIR="$REPO_ROOT/output_ros2"
-SAVE_DIR="$OUT_DIR/step3_kitti$SEQ"
+# Optional SAVE_SUFFIX distinguishes re-runs (e.g. SAVE_SUFFIX=_bigbudget ->
+# output_ros2/step3_kitti02_bigbudget/, logs *_kitti02_bigbudget.log).
+SUFFIX="kitti$SEQ${SAVE_SUFFIX:-}"
+SAVE_DIR="$OUT_DIR/step3_$SUFFIX"
 LOG_DIR="$OUT_DIR"
-SUFFIX="kitti$SEQ"
 CONDA_PY=/root/miniconda3/envs/rap-inference/bin/python
 mkdir -p "$SAVE_DIR"
 
@@ -83,8 +85,12 @@ for _ in $(seq 1 60); do
 done
 
 # 3. Loop-closure node.
+# 3. Loop-closure node. Extra node args can be injected via LOOP_ARGS,
+# e.g. LOOP_ARGS="--ros-args -p max_total:=120" (must come after save_dir
+# so an explicit -p save_dir there would win).
+# shellcheck disable=SC2086
 python3 "$SCRIPT_DIR/loop_closure_node.py" \
-  --ros-args -p save_dir:="$SAVE_DIR" \
+  --ros-args -p save_dir:="$SAVE_DIR" ${LOOP_ARGS:-} \
   > "$LOG_DIR/loop_node_$SUFFIX.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 60); do

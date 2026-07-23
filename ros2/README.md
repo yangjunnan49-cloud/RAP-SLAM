@@ -165,6 +165,9 @@ Tr`; POSS used `False`).
   `/map_cloud` published, merged map >50k points, odometry APE < 10 m. Loop
   count is reported but never fails the run (KITTI 04 has no true loops);
   PGO APE > odometry APE with accepted loops prints a warning only.
+  Env knobs: `LOOP_ARGS="--ros-args -p max_total:=120 ..."` injects extra
+  loop-node params, `SAVE_SUFFIX=_tag` redirects products/logs to
+  `step3_kitti<seq>_tag` / `*_kitti<seq>_tag.log` for side-by-side re-runs.
 - `run_step3_kitti.sh <seq> [rate]` — GUI demo (same RViz step3 config),
   player pointed at the KITTI directory.
 
@@ -181,6 +184,40 @@ Results (2026-07-23, WSL2, RTX 5070, rate 12 Hz, full sequences):
 | 04  | 271/271  | 0 (no true loops) | **2.957 m** (= offline 2.96 m) | 2.957 m | 500000 | PASS |
 | 03  | 801/801  | 0               | **4.428 m**  | 4.428 m | 500000 | PASS |
 | 01  | 1101/1101 | 0              | **117.84 m** | 117.84 m | 500000 | FAIL (odometry drift, see below) |
+| 02  | 4661/4661 | 0 (17 candidates, all correctly rejected) | **31.640 m** | 31.640 m | 500000 | FAIL (absolute criterion; see below) |
+
+Seq 02 (long urban drive, 5.07 km path): the pipeline is healthy — all
+4661 frames processed, 812 keyframes, and odometry drift is only 0.62% of
+path length (31.6 m APE); the absolute <10 m PASS criterion simply does not
+scale to a 5 km sequence. All 17 verified candidates were false positives
+(GT distance 177–386 m) and RAP correctly rejected every one (overlap
+0.03–0.11 < 0.25). Seq 02 **does contain true revisits** (27 GT pairs,
+sep >= 200 scans, dist < 5 m: scans ~930–1030 ↔ ~4200–4270 and
+~1800–1820 ↔ ~4400–4410) whose Scan Context distances are 0.087–0.172 —
+well under the 0.25 threshold — yet they were never proposed, for two
+independent reasons found by a tuned re-run
+(`SAVE_SUFFIX=_bigbudget LOOP_ARGS="--ros-args -p max_total:=120 -p
+sc_shortlist:=25" bash verify_step3_kitti.sh 02 4661 12.0`):
+
+1. **Verification budget exhaustion.** `max_total=16` caps RAP checks per
+   run; false SC hits burned all 16 by scan ~1832, long before the first
+   revisit at scan ~4200. This default was tuned for the 1419-frame POSS
+   segment and is too small for 4661-frame sequences.
+2. **Ring-key shortlist misses the true match.** Even with the budget
+   raised to 120 (121 proposals), the true pairs were never shortlisted —
+   the top-N ring-key prefilter (N=10, even N=25) ranks repetitive urban
+   geometry above the true revisit. SC retrieval recall needs revalidation
+   off-POSS.
+
+The tuned re-run also exposed a real hazard: with more verifications, RAP
+**accepted 11 false loops** (overlap 0.29–0.50, all 98–547 m apart in GT;
+odometry-consistency dT 92–572 m matched GT, so RAP's transforms were the
+wrong ones), PGO APE blew up to 500 m, and CPU contention dropped 408
+scans. Overlap-only acceptance (`min_overlap=0.25`), safe on POSS where
+true loops scored 0.76–0.86, admits false loops on repetitive KITTI urban
+streets scoring 0.35–0.49. Takeaway: seq-02-scale runs need (a) a larger or
+adaptive verification budget, (b) SC shortlist/threshold revalidation
+off-POSS, and (c) a second acceptance signal beyond raw overlap.
 
 KITTI 01 is the highway sequence (~2.45 km path, fast and structureless).
 The pipeline itself is healthy there: all 1101 frames processed, calib
