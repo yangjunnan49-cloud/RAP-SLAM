@@ -63,7 +63,9 @@ def parse_args():
     p.add_argument("--rap-voxel", type=float, default=0.4)
     p.add_argument("--trans-consistency", type=float, default=5.0)
     p.add_argument("--rot-consistency", type=float, default=25.0)
-    p.add_argument("--min-overlap", type=float, default=0.25)
+    p.add_argument("--min-overlap", type=float, default=0.7)
+    p.add_argument("--max-mean-dist", type=float, default=2.5,
+                   help="loop acceptance: max mean symmetric NN distance (m); 0 disables")
     p.add_argument("--no-rap-features", action="store_true",
                    help="disable miniSpinNet features (zero features)")
     p.add_argument("--force-regenerate", action="store_true")
@@ -199,6 +201,7 @@ def main():
                 trans_consistency=args.trans_consistency,
                 rot_consistency_deg=args.rot_consistency,
                 min_overlap=args.min_overlap,
+                max_mean_dist=args.max_mean_dist,
                 gt_poses=gt_poses)
         else:
             logger.info("No loop candidates found")

@@ -73,12 +73,19 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
                       poses: List[np.ndarray], rap_backend,
                       trans_consistency: float = 5.0,
                       rot_consistency_deg: float = 25.0,
-                      min_overlap: float = 0.25,
+                      min_overlap: float = 0.7,
+                      max_mean_dist: float = 2.5,
                       gt_poses: np.ndarray = None) -> List[dict]:
     """Verify loop candidates with RAP 2-way registration.
 
-    A candidate (i, j) is accepted when the scans actually overlap after
-    RAP alignment: overlap_ratio >= min_overlap.
+    A candidate (i, j) is accepted when the scans actually align after RAP
+    registration: overlap_ratio >= min_overlap AND mean_dist <= max_mean_dist
+    (max_mean_dist <= 0 disables the second gate). Defaults come from the
+    KITTI 02 discriminator experiment (scripts/eval_acceptance_gate.py) plus
+    the big-budget live run: true loops overlap 0.76-0.96 / mean_dist
+    0.39-1.45 m; false loops overlap <= 0.64, with gross misregistrations at
+    mean_dist 3.7-22.1 m. Overlap carries the separation (gap 0.64..0.76);
+    mean_dist guards against catastrophic misalignments.
 
     Rationale: the odometry-consistency values (trans/rot discrepancy between
     RAP's transform and the drifting odometry estimate) are logged as
@@ -113,8 +120,10 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
         trans_err = float(np.linalg.norm(dT[:3, 3]))
         rot_err = _rotation_error_deg(dT[:3, :3])
         overlap = diag["overlap_ratio"]
+        mean_dist = diag.get("mean_dist", float("nan"))
 
         msg = (f"pair ({i:3d}, {j:3d}): overlap={overlap:.2f} "
+               f"mean_dist={mean_dist:.2f} m "
                f"odom-consistency dT={trans_err:.2f} m dR={rot_err:.1f} deg "
                f"[{diag['t_inference']:.1f} s infer]")
         if gt_poses is not None:
@@ -126,14 +135,16 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
         else:
             gt_te = gt_re = None
 
-        ok = overlap >= min_overlap  # odom-consistency is diagnostic-only (see docstring)
+        # odom-consistency is diagnostic-only (see docstring)
+        ok = (overlap >= min_overlap and
+              (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist))
         msg += " => ACCEPT" if ok else " => reject"
         logger.info(msg)
 
         if ok:
             accepted.append({
                 "i": i, "j": j, "T_rel": T_rel,
-                "overlap": overlap,
+                "overlap": overlap, "mean_dist": mean_dist,
                 "odom_trans_err": trans_err, "odom_rot_err_deg": rot_err,
                 "gt_trans_err": gt_te, "gt_rot_err_deg": gt_re,
                 "t_infer": diag["t_inference"],

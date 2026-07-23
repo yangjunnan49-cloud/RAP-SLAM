@@ -226,7 +226,8 @@ class LoopClosureNode(Node):
         self.declare_parameter("sc_thresh", 0.25)
         self.declare_parameter("sc_shortlist", 10)
         self.declare_parameter("sc_max_radius", 80.0)
-        self.declare_parameter("min_overlap", 0.25)  # acceptance: RAP overlap only
+        self.declare_parameter("min_overlap", 0.7)   # acceptance gate (see below)
+        self.declare_parameter("max_mean_dist", 2.5)  # m; 0 disables the 2nd gate
         self.declare_parameter("max_per_kf", 3)      # candidate budget per keyframe
         self.declare_parameter("max_total", 16)      # total verification budget
         self.declare_parameter("save_dir", "")
@@ -247,6 +248,7 @@ class LoopClosureNode(Node):
         self.sc_shortlist = int(gp("sc_shortlist").value)
         self.sc_max_radius = float(gp("sc_max_radius").value)
         self.min_overlap = float(gp("min_overlap").value)
+        self.max_mean_dist = float(gp("max_mean_dist").value)
         self.max_per_kf = int(gp("max_per_kf").value)
         self.max_total = int(gp("max_total").value)
         self.save_dir = str(gp("save_dir").value)
@@ -309,7 +311,8 @@ class LoopClosureNode(Node):
             f"Loop-closure node up: {gp('topic').value} + {gp('odom_topic').value} -> "
             f"/map_path + /loop_edges + TF map->odom; server "
             f"{gp('server_host').value}:{gp('server_port').value}, "
-            f"sep={self.loop_sep} sc<{self.sc_thresh} overlap>={self.min_overlap}"
+            f"sep={self.loop_sep} sc<{self.sc_thresh} "
+            f"overlap>={self.min_overlap} mean_dist<={self.max_mean_dist}"
             + (f", saving to {self.save_dir}" if self.save_dir else ""))
 
     # ------------------------------------------------------------------
@@ -477,15 +480,22 @@ class LoopClosureNode(Node):
 
         T_rel = resp["T_rel"]
         overlap = resp["overlap"]
+        mean_dist = resp.get("mean_dist", float("nan"))
         T_odom = np.linalg.inv(self.poses[i]) @ self.poses[j]
         dT = np.linalg.inv(T_odom) @ T_rel
         trans_err = float(np.linalg.norm(dT[:3, 3]))
         rot_err = _rotation_error_deg(dT[:3, :3])
-        # Acceptance on RAP overlap ONLY — gating on odometry consistency is
-        # self-defeating under drift (offline lesson, see loop_closure.py).
-        ok = overlap >= self.min_overlap
+        # Data-driven acceptance gate (eval_acceptance_gate.py, KITTI 02):
+        # true loops overlap 0.76-0.96 / mean_dist 0.39-1.45 m, false loops
+        # overlap <= 0.64 / mean_dist >= 3.7 m for gross failures (two clever
+        # urban false hits reached overlap 0.64 / mean_dist 1.26 m, so the
+        # overlap threshold carries the separation: gap is 0.64 < t < 0.76).
+        # Odometry consistency stays diagnostic-only (offline lesson).
+        ok = (overlap >= self.min_overlap and
+              (self.max_mean_dist <= 0.0 or mean_dist <= self.max_mean_dist))
         self.get_logger().info(
             f"pair ({i:3d}, {j:3d}): overlap={overlap:.2f} "
+            f"mean_dist={mean_dist:.2f} m "
             f"odom-consistency dT={trans_err:.2f} m dR={rot_err:.1f} deg "
             f"[{resp['t_infer']:.1f} s infer, {time.time() - t0:.1f} s total] "
             f"=> {'ACCEPT' if ok else 'reject'}")
@@ -493,6 +503,7 @@ class LoopClosureNode(Node):
             return False
         self.loops.append({
             "i": i, "j": j, "T_rel": T_rel, "overlap": overlap,
+            "mean_dist": mean_dist,
             "odom_trans_err": trans_err, "odom_rot_err_deg": rot_err,
             "t_infer": resp["t_infer"],
         })

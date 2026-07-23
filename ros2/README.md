@@ -219,6 +219,40 @@ streets scoring 0.35–0.49. Takeaway: seq-02-scale runs need (a) a larger or
 adaptive verification budget, (b) SC shortlist/threshold revalidation
 off-POSS, and (c) a second acceptance signal beyond raw overlap.
 
+### Acceptance gate (fixed 2026-07-23)
+
+Hazard (c) is fixed by a two-metric acceptance gate, driven by the
+discriminator experiment `../scripts/eval_acceptance_gate.py` (8 GT-true
+KITTI 02 revisit pairs + the 11 false pairs re-scored offline, plus the 2
+hardest false hits from a live re-run):
+
+| metric | TRUE loops (n=8 KITTI + 4 POSS) | FALSE loops (n=13) |
+|--------|--------------------------------|---------------------|
+| overlap | 0.75–0.96 | ≤ 0.64 |
+| mean symmetric NN dist (m) | 0.39–1.45 | ≥ 1.26 (gross failures 3.7–22.1) |
+| T_rel error vs GT | 0.15–4.3 m / ≤ 1.3° | 98–494 m |
+
+Acceptance is now `overlap >= min_overlap AND mean_dist <= max_mean_dist`
+with defaults **min_overlap 0.7 / max_mean_dist 2.5 m** (0 disables the
+distance gate). Overlap carries the separation (gap 0.64 < t < 0.76);
+mean_dist guards against catastrophic misalignments whose overlap spikes
+(up to 0.50 observed live). Odometry consistency remains diagnostic-only.
+`mean_dist` is computed alongside `overlap_ratio` in
+`RAPBackend._alignment_metrics` and threaded through `rap_server.py`,
+`loop_closure_node.py` (ROS params `min_overlap`, `max_mean_dist`), and
+offline `rap_slam/loop_closure.py` + `run_pipeline.py --max-mean-dist`.
+
+Regressions with the gate: POSS live re-run PASS (loops (0,1394)
+0.76/1.00 m and (0,1415) 0.86/0.62 m accepted, PGO APE 1.757 m); KITTI 02
+big-budget re-run (121 verifications): **0 false accepts** — including the
+two clever urban misregistrations at overlap 0.62/0.64 — PGO APE stays at
+the odometry value 31.640 m (the absolute <10 m script criterion still
+FAILs on 5 km seq 02, expected); offline POSS pipeline reproduces the
+baseline exactly (4/4 loops accepted, PGO APE 1.821 m). Seq 02's TRUE
+loops remain unverified in the live system (retrieval shortlist issue
+above); their measured overlaps 0.85–0.96 would pass the gate once
+retrieval proposes them.
+
 KITTI 01 is the highway sequence (~2.45 km path, fast and structureless).
 The pipeline itself is healthy there: all 1101 frames processed, calib
 correct (first-100-frame APE 0.42 m — a frame-conversion bug would break

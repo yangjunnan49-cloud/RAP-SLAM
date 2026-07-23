@@ -279,14 +279,16 @@ class RAPBackend:
         # Relative transform: pose of b expressed in a's frame.
         T_rel = np.linalg.inv(T_parts[0]) @ T_parts[1]
 
-        # Overlap diagnostic on the downsampled clouds (in meters).
-        overlap = self._overlap_ratio(ds_a, ds_b, T_rel, thresh=1.0)
+        # Alignment diagnostics on the downsampled clouds (in meters).
+        overlap, mean_dist = self._alignment_metrics(ds_a, ds_b, T_rel,
+                                                     thresh=1.0)
 
         diag = {
             "n_a": n_a, "n_b": n_b,
             "scale": scale,
             "anchor_idx": anchor_idx,
             "overlap_ratio": overlap,
+            "mean_dist": mean_dist,
             "t_preprocess": t_prep,
             "t_inference": t_infer,
             "t_total": time.time() - t_start,
@@ -389,17 +391,33 @@ class RAPBackend:
         return T_parts, diag
 
     @staticmethod
-    def _overlap_ratio(ds_a: np.ndarray, ds_b: np.ndarray, T_rel: np.ndarray,
-                       thresh: float = 1.0) -> float:
-        """Fraction of points with a mutual nearest neighbor within thresh (m)."""
+    def _alignment_metrics(ds_a: np.ndarray, ds_b: np.ndarray, T_rel: np.ndarray,
+                           thresh: float = 1.0) -> Tuple[float, float]:
+        """Symmetric NN statistics of the aligned clouds.
+
+        Returns:
+            overlap: fraction of points with a mutual nearest neighbor
+                within thresh (m) — mean of both directions.
+            mean_dist: mean symmetric nearest-neighbor distance (m) of the
+                same distance field. Separates true from false registrations
+                far more sharply than overlap (KITTI 02: true 0.39-1.45 m,
+                false 3.7-22.1 m).
+        """
         from scipy.spatial import cKDTree
         if len(ds_a) == 0 or len(ds_b) == 0:
-            return 0.0
+            return 0.0, float("inf")
         b_in_a = (T_rel[:3, :3] @ ds_b.T).T + T_rel[:3, 3]
         tree_a = cKDTree(ds_a)
         tree_b = cKDTree(b_in_a)
         d_ba, _ = tree_a.query(b_in_a, k=1)
         d_ab, _ = tree_b.query(ds_a, k=1)
-        frac_b = float(np.mean(d_ba < thresh))
-        frac_a = float(np.mean(d_ab < thresh))
-        return 0.5 * (frac_a + frac_b)
+        overlap = 0.5 * (float(np.mean(d_ba < thresh)) +
+                         float(np.mean(d_ab < thresh)))
+        mean_dist = 0.5 * (float(np.mean(d_ba)) + float(np.mean(d_ab)))
+        return overlap, mean_dist
+
+    @classmethod
+    def _overlap_ratio(cls, ds_a: np.ndarray, ds_b: np.ndarray, T_rel: np.ndarray,
+                       thresh: float = 1.0) -> float:
+        """Fraction of points with a mutual nearest neighbor within thresh (m)."""
+        return cls._alignment_metrics(ds_a, ds_b, T_rel, thresh)[0]

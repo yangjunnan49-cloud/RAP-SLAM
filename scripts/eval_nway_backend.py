@@ -60,7 +60,7 @@ def parse_args():
     p.add_argument("--loop-dist", type=float, default=15.0)
     p.add_argument("--sc-dist-thresh", type=float, default=0.25)
     p.add_argument("--max-candidates", type=int, default=8)
-    p.add_argument("--min-overlap", type=float, default=0.25)
+    p.add_argument("--min-overlap", type=float, default=0.7)
     p.add_argument("--rap-root", default="/mnt/e/githouse/RAP-main")
     p.add_argument("--rap-steps", type=int, default=5)
     p.add_argument("--rap-max-points", type=int, default=4000)

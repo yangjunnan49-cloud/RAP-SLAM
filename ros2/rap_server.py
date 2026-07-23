@@ -95,6 +95,7 @@ class Worker:
             "ok": True,
             "T_rel": T_rel,
             "overlap": float(diag["overlap_ratio"]),
+            "mean_dist": float(diag["mean_dist"]),
             "t_preprocess": float(diag["t_preprocess"]),
             "t_infer": float(diag["t_inference"]),
             "t_total": float(diag["t_total"]),
