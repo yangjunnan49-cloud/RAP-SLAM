@@ -33,6 +33,8 @@ publishing the `map -> odom` correction TF, a corrected `/map_path`, and
   `../output_poss/odom_poses.txt`.
 - `verify_step3_headless.sh` — no-GUI regression: full live loop-closure
   pipeline vs ground truth (APE before/after PGO).
+- `run_step3_kitti.sh` / `verify_step3_kitti.sh` — KITTI odometry variants
+  (GUI demo / headless verification) — see the "KITTI live runs" section.
 
 ## Step 0 — install + verify DDS
 
@@ -146,6 +148,52 @@ bash /mnt/e/githouse/RAP-SLAM/ros2/verify_step3_headless.sh 1419 12
 # merged map 500k points rebuilt per PGO (~0.17 s), saved as
 # output_ros2/step3/merged_map_live.ply
 ```
+
+## KITTI live runs (Step 3 on KITTI odometry sequences)
+
+The same 4-process Step-3 stack runs on the KITTI odometry velodyne tree at
+`/mnt/e/githouse/Datasets/data_odometry_velodyne/dataset/` (sequences 01–04,
+scans + poses + calib verified complete). Nothing in the nodes is
+dataset-specific; only the player's `data_dir` and the evaluation GT differ.
+KITTI ground truth **must** use `apply_calib=True` (`T_velo = Tr^-1 @ T_cam @
+Tr`; POSS used `False`).
+
+- `verify_step3_kitti.sh <seq> [n_frames] [rate]` — headless verification,
+  sibling of `verify_step3_headless.sh`. Products in
+  `output_ros2/step3_kitti<seq>/`, logs `output_ros2/*_kitti<seq>.log` (POSS
+  artifacts untouched). PASS criteria: all n odometry frames present,
+  `/map_cloud` published, merged map >50k points, odometry APE < 10 m. Loop
+  count is reported but never fails the run (KITTI 04 has no true loops);
+  PGO APE > odometry APE with accepted loops prints a warning only.
+- `run_step3_kitti.sh <seq> [rate]` — GUI demo (same RViz step3 config),
+  player pointed at the KITTI directory.
+
+```bash
+bash /mnt/e/githouse/RAP-SLAM/ros2/verify_step3_kitti.sh 04 271 12.0
+bash /mnt/e/githouse/RAP-SLAM/ros2/verify_step3_kitti.sh 03        # full seq, 12 Hz
+bash /mnt/e/githouse/RAP-SLAM/ros2/run_step3_kitti.sh 04 12.0      # GUI demo
+```
+
+Results (2026-07-23, WSL2, RTX 5070, rate 12 Hz, full sequences):
+
+| Seq | Frames | Loops accepted | Odometry APE | PGO APE | Map points | Verdict |
+|-----|--------|----------------|--------------|---------|------------|---------|
+| 04  | 271/271  | 0 (no true loops) | **2.957 m** (= offline 2.96 m) | 2.957 m | 500000 | PASS |
+| 03  | 801/801  | 0               | **4.428 m**  | 4.428 m | 500000 | PASS |
+| 01  | 1101/1101 | 0              | **117.84 m** | 117.84 m | 500000 | FAIL (odometry drift, see below) |
+
+KITTI 01 is the highway sequence (~2.45 km path, fast and structureless).
+The pipeline itself is healthy there: all 1101 frames processed, calib
+correct (first-100-frame APE 0.42 m — a frame-conversion bug would break
+immediately), RPE 0.037 m/step. The APE grows monotonically with distance
+(0.42 m @100 fr → 5.9 m @300 → 35 m @600 → 117.8 m @1101, ~4.8% of path
+length) — classic KISS-ICP drift on KITTI 01, not a live-pipeline defect.
+No loop candidates fire (the trajectory never revisits a place), so PGO has
+nothing to correct.
+
+**Run these scripts as root** (`wsl -u root bash ...`): the conda env lives
+under `/root/miniconda3`, and WSL sessions that default to a non-root user
+fail with "Permission denied" on the rap_server launch.
 
 ## Notes / gotchas
 
