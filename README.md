@@ -125,7 +125,7 @@ RAP-SLAM/
 │   ├── poss/dataset/...      # POSS 位姿、标定、1419 帧 velodyne
 │   └── kitti/dataset/...     # KITTI 位姿 + 标定（全 22 序列）；velodyne 扫描
 │                             #   在 E:\githouse\Datasets\data_odometry_velodyne
-│                             #   （seq 01–04 完整，已组装 poses/calib/times，可直接作 --real-root）
+│                             #   （全 22 序列完整已验证 2026-08-01，poses/calib/times 已组装，可直接作 --real-root）
 ├── output/                   # 模拟序列结果
 ├── output_poss/              # 真实序列结果（proximity 检索）
 ├── output_poss_sc/           # 真实序列结果（both：SC + 邻近合并，复现 1.82 m）
@@ -158,5 +158,5 @@ RAP-SLAM/
 - **RC-4 —— 分层 N 路后端**：回环簇内 `register_multi` 联合配准（5–7 帧布局 rmse 0.145 m、环一致）+ 簇间 PGO 缝合。RAP 从两两验证器升级为子图优化器。已知约束：82 帧一次性配准全局翘曲（55 m）；簇门 (i,j)-cluster 是天然的批次单元。
 - **RC-5 —— 稀疏里程计精化（探索性）**：长无重访段（如 KITTI-02 帧 0–900 / 2000–3400）关键帧对 RAP 精化里程计边；~1 s/次，只能稀疏用。排在 RC-2/RC-3 量化单次可靠性之后。
 
-已完成（保留备查）：阶段一离线管线 ✅；POSS 真实序列 8.26→1.82 m ✅；Scan Context 全局检索 ✅（+2026-08-01 流式召回重构 `b39d116`，KITTI-02 0→182 边）；N 路首轮对照 ✅（→RC-4）；阶段二 ROS 2 Step 0–3 ✅（剩 rosbag 录制、每次后端改动后 GUI 抽查；KITTI seq 06 数据待 owner 补齐）。
+已完成（保留备查）：阶段一离线管线 ✅；POSS 真实序列 8.26→1.82 m ✅；Scan Context 全局检索 ✅（+2026-08-01 流式召回重构 `b39d116`，KITTI-02 0→182 边）；N 路首轮对照 ✅（→RC-4）；阶段二 ROS 2 Step 0–3 ✅（剩 rosbag 录制、每次后端改动后 GUI 抽查）；KITTI velodyne 全 22 序列已到位 ✅（2026-08-01 合并验证，seq 06 冒烟 PGO APE 2.441 m、12/12 回环全真）；RC-2 SC 偏航预旋转 ✅（证伪：RAP 本身偏航不变，无需接入）。
 
