@@ -75,6 +75,9 @@ curl -O http://www.poss.pku.edu.cn/OpenDataResource/poss_odomotry/data_odometry_
 curl -O http://www.poss.pku.edu.cn/OpenDataResource/poss_odomotry/data_odometry_calib.zip
 # 雷达帧段（断点续传，已下载的自动跳过）
 python scripts/download_poss_segment.py --start 3850 --end 5268 --threads 4
+# 第二段（POSS-B，帧 6750–9500，~2.8 GB；GT 重访分析选出的回环富集段，
+# 分析依据见 RAP-main/AGENTS.md 2026-08-01 附录）
+python scripts/download_poss_segment.py --start 6750 --end 9500 --threads 4
 ```
 
 ## 运行方法（WSL2）

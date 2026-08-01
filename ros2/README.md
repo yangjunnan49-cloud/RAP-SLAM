@@ -114,8 +114,20 @@ Architecture (two interpreters, one localhost socket):
   thresholds as the offline pipeline: 6 m / 12 deg), Scan Context descriptors
   per keyframe, proximity + SC candidates (same params as the offline POSS
   run: sep 200, dist 15 m, SC < 0.25), RAP verification in a worker thread
-  (acceptance on overlap >= 0.25 only — never gate on odometry consistency),
-  GTSAM PGO after each accepted loop.
+  (acceptance: two-metric gate on RAP's intrinsic geometry — overlap >= 0.7
+  AND mean_dist <= 2.5 m, `min_overlap`/`max_mean_dist`; never gate on
+  odometry consistency), GTSAM PGO after each accepted loop.
+
+PGO loop-edge noise (RAP-CORE RC-1, 2026-08-01): per-edge sigmas are
+floor-relative-scaled from the edge's RAP `mean_dist`
+(scale = clip(mean_dist/`pgo_relfloor_ref` 1.0 m, 1, `pgo_relfloor_cap` 3))
+and wrapped in a Huber(`pgo_huber_k` 1) kernel — params
+`pgo_loop_weighting` (fixed|adaptive|relfloor, default relfloor) and
+`pgo_robust_kernel` (""|huber|dcs, default huber). `_run_pgo` sends each
+loop's `mean_dist` to the server; `rap_server.py` forwards the weighting
+fields to `rap_slam.pose_graph.optimize_pose_graph`. Empirical basis:
+`scripts/eval_pgo_robust.py` (KITTI-02 27.387 -> 26.423 m, POSS
+bit-identical 1.757 m).
 
 Outputs: TF `map -> odom` correction (10 Hz, identity until the first loop),
 `/map_path` (nav_msgs/Path, map frame, PGO-corrected trajectory),
