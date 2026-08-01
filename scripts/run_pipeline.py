@@ -66,6 +66,22 @@ def parse_args():
     p.add_argument("--min-overlap", type=float, default=0.7)
     p.add_argument("--max-mean-dist", type=float, default=2.5,
                    help="loop acceptance: max mean symmetric NN distance (m); 0 disables")
+    # RAP-CORE PGO (2026-08-01): floor-relative adaptive sigmas from RAP
+    # mean_dist + Huber; best cross-dataset combo (eval_pgo_robust.py:
+    # KITTI-02 27.387 -> 26.423 m, POSS bit-identical 1.757 m).
+    p.add_argument("--loop-weighting", choices=["fixed", "adaptive", "relfloor"],
+                   default="relfloor",
+                   help="fixed: uniform loop sigmas; adaptive: absolute sigmas "
+                        "from mean_dist; relfloor: loosen only edges sloppier "
+                        "than --relfloor-ref (cross-dataset safe)")
+    p.add_argument("--relfloor-ref", type=float, default=1.0,
+                   help="reference RAP mean_dist (m) for relfloor weighting")
+    p.add_argument("--relfloor-cap", type=float, default=3.0,
+                   help="max sigma loosening factor for relfloor weighting")
+    p.add_argument("--robust-kernel", choices=["none", "huber", "dcs"],
+                   default="huber", help="robust mEstimator on loop edges")
+    p.add_argument("--huber-k", type=float, default=1.0)
+    p.add_argument("--dcs-phi", type=float, default=10.0)
     p.add_argument("--no-rap-features", action="store_true",
                    help="disable miniSpinNet features (zero features)")
     p.add_argument("--force-regenerate", action="store_true")
@@ -211,7 +227,15 @@ def main():
     logger.info("=" * 70)
     logger.info("STAGE 5: pose-graph optimization")
     t0 = time.time()
-    optimized_kf = pose_graph.optimize_pose_graph(odom_poses, keyframes, accepted)
+    optimized_kf = pose_graph.optimize_pose_graph(
+        odom_poses, keyframes, accepted,
+        loop_weighting=args.loop_weighting,
+        robust_kernel=None if args.robust_kernel == "none"
+        else args.robust_kernel,
+        huber_k=args.huber_k,
+        dcs_phi=args.dcs_phi,
+        relfloor_ref=args.relfloor_ref,
+        relfloor_cap=args.relfloor_cap)
     opt_poses = pose_graph.propagate_to_full_trajectory(odom_poses, keyframes,
                                                         optimized_kf)
     sequence.save_kitti_poses(np.stack(opt_poses),

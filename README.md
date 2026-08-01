@@ -145,11 +145,15 @@ RAP-SLAM/
 - PGO 中回环边的信息矩阵为固定值，未按 RAP 重叠率/拟合残差自适应加权。
 - 真实验证目前只有单段（POSS 413 m 校园闭环）；尚未在多数据集（KITTI/MCD/Livox）上做泛化验证。
 
-## 路线图
+## 路线图（RAP-CORE，2026-08-01 重构）
 
-1. ~~阶段一：纯 Python 离线管线最小闭环（模拟序列）~~ ✅
-2. ~~真实 LiDAR 序列验证（POSS 校园闭环，APE 8.26→1.82 m）~~ ✅
-3. ~~Scan Context 全局回环检索~~ ✅（2026-07-20，POSS 上 P=R=1.0，抗 13.3 m 漂移）+ 多数据集泛化（KITTI seq06 数据已可抽取，受网速限制暂缓）
-4. ~~RAP N 路联合配准后端首轮对照~~ ✅（2026-07-20：小批次环一致约束优于 pairwise-PGO 4.7%（1.74 vs 1.82 m）；82 帧一次性配准全局翘曲 55 m）→ 迭代方向：分层 N 路（回环簇内联合 + 簇间 PGO 缝合）、多种子方差评估
-5. 阶段二：ROS 2 (Jazzy) 节点化 + RViz 可视化
+**核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。
+
+- **RC-1 ✅ 2026-08-01 —— 后端消费 RAP 逐边诊断**：PGO 回环边信息加权 = floor-relative 自适应 σ（`relfloor`，scale = clip(mean_dist/1.0 m, 1, 3)）+ Huber(k=1) 鲁棒核（`pose_graph.py` 默认，经 `rap_server.py` / 节点 `pgo_*` 参数 / `run_pipeline.py` 全线接通）。依据 `scripts/eval_pgo_robust.py`（182 条 KITTI-02 + 2 条 POSS 已存边）：KITTI-02 APE 27.387→**26.423 m**，POSS 逐位不变 **1.757 m**；50% 边被 5 m σ 污染时鲁棒核保持 ~25 m（固定加权爆到 80 m+）。诊断→误差相关性弱（r≈0.25），故只做"只松不紧"的 floor-relative 放宽；绝对自适应（`--loop-weighting adaptive`）在 KITTI 上最优（25.688 m）但 POSS 回退 1.961 m，保留为调参项。
+- **RC-2 ⏭ 下一步 —— SC yaw-hint → RAP 预旋转**：Scan Context 已产出逐对 yaw 估计（列移 × 6°，目前仅记日志）。验证前将 b 帧预旋转，扩大 RAP 在大旋角重访（反向街道，正是 KITTI-02 的混叠形态）上的收敛域。先做离线重打分对照，再 live 复跑。
+- **RC-3 —— 多生成置信度**：`n_generations=k`，用生成间位姿离散度作验收门信号和 PGO σ——把 RAP 的采样随机性变成免费的不确定性估计。
+- **RC-4 —— 分层 N 路后端**：回环簇内 `register_multi` 联合配准（5–7 帧布局 rmse 0.145 m、环一致）+ 簇间 PGO 缝合。RAP 从两两验证器升级为子图优化器。已知约束：82 帧一次性配准全局翘曲（55 m）；簇门 (i,j)-cluster 是天然的批次单元。
+- **RC-5 —— 稀疏里程计精化（探索性）**：长无重访段（如 KITTI-02 帧 0–900 / 2000–3400）关键帧对 RAP 精化里程计边；~1 s/次，只能稀疏用。排在 RC-2/RC-3 量化单次可靠性之后。
+
+已完成（保留备查）：阶段一离线管线 ✅；POSS 真实序列 8.26→1.82 m ✅；Scan Context 全局检索 ✅（+2026-08-01 流式召回重构 `b39d116`，KITTI-02 0→182 边）；N 路首轮对照 ✅（→RC-4）；阶段二 ROS 2 Step 0–3 ✅（剩 rosbag 录制、每次后端改动后 GUI 抽查；KITTI seq 06 数据待 owner 补齐）。
 

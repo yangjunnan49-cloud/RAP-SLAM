@@ -112,9 +112,17 @@ class Worker:
             odom_poses=req["odom_kf"],
             keyframes=list(req["keyframes"]),
             loop_constraints=req["loops"],
+            loop_weighting=req.get("loop_weighting", "relfloor"),
+            robust_kernel=req.get("robust_kernel", "huber"),
+            huber_k=float(req.get("huber_k", 1.0)),
+            dcs_phi=float(req.get("dcs_phi", 10.0)),
+            relfloor_ref=float(req.get("relfloor_ref", 1.0)),
+            relfloor_cap=float(req.get("relfloor_cap", 3.0)),
         )
         logger.info(f"PGO: {len(req['keyframes'])} nodes, "
-                    f"{len(req['loops'])} loop edges, "
+                    f"{len(req['loops'])} loop edges "
+                    f"(weighting={req.get('loop_weighting', 'fixed')}, "
+                    f"kernel={req.get('robust_kernel')}), "
                     f"{time.time() - t0:.2f} s")
         return {"ok": True, "optimized": optimized}
 

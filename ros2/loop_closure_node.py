@@ -238,6 +238,17 @@ class LoopClosureNode(Node):
         self.declare_parameter("cluster_w", 50)      # (i,j) Chebyshev window (scans)
         self.declare_parameter("cluster_spacing", 25)  # in-cluster NMS (scans)
         self.declare_parameter("pgo_max_wait", 30.0)  # s; run pending PGO even if the queue is busy
+        # RAP-CORE PGO (2026-08-01, eval_pgo_robust.py on 182 KITTI-02 +
+        # 2 POSS edges): floor-relative sigmas from RAP mean_dist + Huber(k=1)
+        # is the best cross-dataset scheme (KITTI 27.387 -> 26.423 m, POSS
+        # bit-identical 1.757 m; absolute "adaptive" wins on KITTI but
+        # regresses POSS, kept available for tuning).
+        self.declare_parameter("pgo_loop_weighting", "relfloor")  # fixed|adaptive|relfloor
+        self.declare_parameter("pgo_robust_kernel", "huber")      # ""|huber|dcs
+        self.declare_parameter("pgo_huber_k", 1.0)
+        self.declare_parameter("pgo_dcs_phi", 10.0)
+        self.declare_parameter("pgo_relfloor_ref", 1.0)  # m
+        self.declare_parameter("pgo_relfloor_cap", 3.0)
         self.declare_parameter("save_dir", "")
         # Accumulated-map publication (/map_cloud):
         self.declare_parameter("map_voxel", 0.3)     # per-scan pre-downsample (m)
@@ -260,6 +271,12 @@ class LoopClosureNode(Node):
         self.max_per_kf = int(gp("max_per_kf").value)
         self.max_total = int(gp("max_total").value)
         self.pgo_max_wait = float(gp("pgo_max_wait").value)
+        self.pgo_loop_weighting = str(gp("pgo_loop_weighting").value)
+        self.pgo_robust_kernel = str(gp("pgo_robust_kernel").value) or None
+        self.pgo_huber_k = float(gp("pgo_huber_k").value)
+        self.pgo_dcs_phi = float(gp("pgo_dcs_phi").value)
+        self.pgo_relfloor_ref = float(gp("pgo_relfloor_ref").value)
+        self.pgo_relfloor_cap = float(gp("pgo_relfloor_cap").value)
         self.gate = ClusterGate(
             window=int(gp("cluster_w").value),
             min_cluster=int(gp("min_cluster").value),
@@ -557,12 +574,21 @@ class LoopClosureNode(Node):
     def _run_pgo(self, client):
         kfs = list(self.keyframes)
         odom_kf = {k: self.poses[k] for k in kfs}
-        loops = [{"i": lc["i"], "j": lc["j"], "T_rel": lc["T_rel"]}
+        # mean_dist rides along: the server's PGO uses it for RAP-adaptive
+        # per-edge sigmas when pgo_loop_weighting=adaptive.
+        loops = [{"i": lc["i"], "j": lc["j"], "T_rel": lc["T_rel"],
+                  "mean_dist": lc.get("mean_dist", 0.5)}
                  for lc in self.loops]
         t0 = time.time()
         try:
             resp = client.request({"cmd": "pgo", "odom_kf": odom_kf,
-                                   "keyframes": kfs, "loops": loops})
+                                   "keyframes": kfs, "loops": loops,
+                                   "loop_weighting": self.pgo_loop_weighting,
+                                   "robust_kernel": self.pgo_robust_kernel,
+                                   "huber_k": self.pgo_huber_k,
+                                   "dcs_phi": self.pgo_dcs_phi,
+                                   "relfloor_ref": self.pgo_relfloor_ref,
+                                   "relfloor_cap": self.pgo_relfloor_cap})
         except (ConnectionError, RuntimeError) as e:
             self.get_logger().error(f"PGO request failed: {e}")
             return
