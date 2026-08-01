@@ -75,10 +75,14 @@ python3 "$SCRIPT_DIR/pointcloud_player.py" --ros-args -p end:=$END -p rate:=$RAT
 PIDS+=($!)
 
 # Wait for playback to finish (RATE Hz + margin), then for the verification
-# queue to drain (RAP checks still running after the last scan).
+# queue to drain (RAP checks still running after the last scan). Counts
+# "Loop worker idle" lines so an idle message logged DURING playback does
+# not end the wait early; DRAIN_SECS (default 240) bounds the wait.
 sleep $((N / ${RATE%.*} + 15))
-for _ in $(seq 1 240); do
-  grep -q "Loop worker idle" "$LOG_DIR/loop_node.log" 2>/dev/null && break
+IDLE0=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node.log" 2>/dev/null || echo 0)
+for _ in $(seq 1 "${DRAIN_SECS:-240}"); do
+  IDLE1=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node.log" 2>/dev/null || echo 0)
+  [ "$IDLE1" -gt "$IDLE0" ] && break
   sleep 1
 done
 

@@ -95,6 +95,51 @@ def sc_distance(sc_a: np.ndarray, sc_b: np.ndarray) -> Tuple[float, int]:
     return float(best_d), int(best_shift)
 
 
+def sc_distances_batch(db_scs: np.ndarray, query_sc: np.ndarray
+                       ) -> Tuple[np.ndarray, np.ndarray]:
+    """Vectorized sc_distance(db_k, query_sc) for a stack of descriptors.
+
+    Computes the column-shift-invariant distance between the query and
+    every descriptor in the database stack at once, with exactly the same
+    semantics (and numerical results) as calling sc_distance per entry:
+    the QUERY is rolled over all column shifts, per-column cosine
+    similarity, columns empty in both count as similar, columns empty in
+    exactly one count as dissimilar.
+
+    Args:
+        db_scs: (K, n_rings, n_sectors) stack of database descriptors.
+        query_sc: (n_rings, n_sectors) query descriptor.
+
+    Returns:
+        (dists, shifts): float64 (K,) and int64 (K,) arrays; dists[k] and
+        shifts[k] match sc_distance(db_scs[k], query_sc).
+    """
+    db = np.asarray(db_scs, dtype=np.float64)
+    q = np.asarray(query_sc, dtype=np.float64)
+    if db.shape[0] == 0:
+        return np.zeros(0), np.zeros(0, dtype=np.int64)
+    n_sectors = q.shape[1]
+    norm_db = np.linalg.norm(db, axis=1)  # (K, S)
+    norm_q = np.linalg.norm(q, axis=0)    # (S,)
+
+    best_d = np.full(db.shape[0], np.inf)
+    best_shift = np.zeros(db.shape[0], dtype=np.int64)
+    for shift in range(n_sectors):
+        q_shift = np.roll(q, shift, axis=1)
+        nq = np.roll(norm_q, shift)
+        denom = norm_db * nq[None, :]
+        dot = np.einsum("krs,rs->ks", db, q_shift)
+        sim = np.zeros_like(denom)
+        valid = denom > 1e-8
+        sim[valid] = dot[valid] / denom[valid]
+        sim[(norm_db < 1e-8) & (nq[None, :] < 1e-8)] = 1.0  # both empty
+        d = 1.0 - sim.mean(axis=1)
+        better = d < best_d
+        best_d[better] = d[better]
+        best_shift[better] = shift
+    return best_d, best_shift
+
+
 def build_descriptors(scans: List[np.ndarray], indices: List[int],
                       n_rings: int = 20, n_sectors: int = 60,
                       max_radius: float = 80.0,

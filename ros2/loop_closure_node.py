@@ -47,6 +47,7 @@ from visualization_msgs.msg import Marker
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rap_slam import scan_context as sc_mod  # noqa: E402
+from rap_slam.cluster_gate import ClusterGate  # noqa: E402
 from rap_slam.pose_graph import propagate_to_full_trajectory  # noqa: E402
 
 
@@ -224,12 +225,19 @@ class LoopClosureNode(Node):
         self.declare_parameter("loop_sep", 200)      # offline POSS used --loop-sep 200
         self.declare_parameter("loop_dist", 15.0)
         self.declare_parameter("sc_thresh", 0.25)
-        self.declare_parameter("sc_shortlist", 10)
+        self.declare_parameter("sc_shortlist", 10)   # deprecated (ring-key prefilter removed 2026-07-31)
         self.declare_parameter("sc_max_radius", 80.0)
         self.declare_parameter("min_overlap", 0.7)   # acceptance gate (see below)
         self.declare_parameter("max_mean_dist", 2.5)  # m; 0 disables the 2nd gate
         self.declare_parameter("max_per_kf", 3)      # candidate budget per keyframe
-        self.declare_parameter("max_total", 16)      # total verification budget
+        self.declare_parameter("max_total", 0)       # total verification budget (0 = unlimited)
+        # Retrieval rework 2026-07-31: full-scan SC + cluster-persistence gate.
+        self.declare_parameter("sc_strong", 0.12)    # SC score skipping the gate
+        self.declare_parameter("min_cluster", 2)     # cluster size to promote
+        self.declare_parameter("max_per_cluster", 2) # persistence promotions / cluster
+        self.declare_parameter("cluster_w", 50)      # (i,j) Chebyshev window (scans)
+        self.declare_parameter("cluster_spacing", 25)  # in-cluster NMS (scans)
+        self.declare_parameter("pgo_max_wait", 30.0)  # s; run pending PGO even if the queue is busy
         self.declare_parameter("save_dir", "")
         # Accumulated-map publication (/map_cloud):
         self.declare_parameter("map_voxel", 0.3)     # per-scan pre-downsample (m)
@@ -251,6 +259,13 @@ class LoopClosureNode(Node):
         self.max_mean_dist = float(gp("max_mean_dist").value)
         self.max_per_kf = int(gp("max_per_kf").value)
         self.max_total = int(gp("max_total").value)
+        self.pgo_max_wait = float(gp("pgo_max_wait").value)
+        self.gate = ClusterGate(
+            window=int(gp("cluster_w").value),
+            min_cluster=int(gp("min_cluster").value),
+            max_per_cluster=int(gp("max_per_cluster").value),
+            spacing=int(gp("cluster_spacing").value),
+            strong_thresh=float(gp("sc_strong").value))
         self.save_dir = str(gp("save_dir").value)
         self.map_voxel = float(gp("map_voxel").value)
         self.map_stride = max(1, int(gp("map_stride").value))
@@ -262,7 +277,8 @@ class LoopClosureNode(Node):
         self.stamps = []       # float seconds per scan
         self.keyframes = []    # scan indices
         self.kf_scans = {}     # keyframe idx -> (N,3) float32 raw scan
-        self.kf_desc = {}      # keyframe idx -> {"sc", "ring_key"}
+        self._sc_db_indices = []  # keyframe scan indices in arrival order
+        self._sc_db = []       # Scan Context per keyframe (aligned with _sc_db_indices)
         self.loops = []        # accepted loop dicts {i, j, T_rel, overlap, ...}
         self.optimized = None  # {keyframe idx: 4x4} from the latest PGO
         self.kfs_at_pgo = []   # keyframe list snapshot used by the latest PGO
@@ -277,9 +293,11 @@ class LoopClosureNode(Node):
         self._last_key = None  # newest processed (sec, nanosec)
         self._dropped = 0
 
-        # --- candidate pipeline to the worker thread ---
-        self._queue = queue.Queue()
+        # --- candidate pipeline to the worker thread (best-first) ---
+        self._queue = queue.PriorityQueue()
+        self._qc = 0           # tie-break counter for queue items
         self._proposed = set()
+        self._queued_pairs = set()
         self._verified = 0
         self._stop = threading.Event()
 
@@ -312,6 +330,7 @@ class LoopClosureNode(Node):
             f"/map_path + /loop_edges + TF map->odom; server "
             f"{gp('server_host').value}:{gp('server_port').value}, "
             f"sep={self.loop_sep} sc<{self.sc_thresh} "
+            f"strong<{self.gate.strong_thresh} cluster>={self.gate.min_cluster} "
             f"overlap>={self.min_overlap} mean_dist<={self.max_mean_dist}"
             + (f", saving to {self.save_dir}" if self.save_dir else ""))
 
@@ -375,12 +394,15 @@ class LoopClosureNode(Node):
             self.keyframes.append(idx)
             self.kf_scans[idx] = xyz
             sc = sc_mod.make_scan_context(xyz, max_radius=self.sc_max_radius)
-            self.kf_desc[idx] = {"sc": sc, "ring_key": sc_mod.make_ring_key(sc)}
             self.get_logger().info(
                 f"keyframe #{len(self.keyframes)} at scan {idx} "
                 f"pos=({pose[0, 3]:.1f}, {pose[1, 3]:.1f}, {pose[2, 3]:.1f})")
             if len(self.keyframes) > 1:
-                self._propose_candidates(idx)
+                self._propose_candidates(idx, sc)
+            # Register in the SC database AFTER proposing (earlier keyframes
+            # only are matched against the new one).
+            self._sc_db_indices.append(idx)
+            self._sc_db.append(sc)
 
         self.count += 1
         if self.count % 200 == 0:
@@ -389,43 +411,58 @@ class LoopClosureNode(Node):
                 f"loops={len(self.loops)} queue={self._queue.qsize()} "
                 f"dropped={self._dropped}")
 
-    def _propose_candidates(self, j: int):
-        """Proximity + Scan Context candidates for the new keyframe j."""
+    def _propose_candidates(self, j: int, sc_j: np.ndarray):
+        """Proximity + full-scan Scan Context candidates for keyframe j,
+        filtered through the cluster-persistence gate (2026-07-31 rework).
+
+        Replaces the old ring-key shortlist: SC distances are computed
+        against ALL earlier keyframes (vectorized, no prefilter), then the
+        ClusterGate decides which pairs reach the verification queue —
+        strong SC hits and proximity hits queue immediately, weaker SC
+        hits must persist (their (i, j) cluster must reach min_cluster
+        members). The queue is best-first: SC hits (by SC distance)
+        before proximity hits."""
         pos_j = self.poses[j][:3, 3]
-        prox = []
-        earlier = [i for i in self.keyframes[:-1] if j - i >= self.loop_sep]
+        earlier = [i for i in self._sc_db_indices if j - i >= self.loop_sep]
+        cand = []  # (tier, score, i, yaw_hint): tier 0 = SC, 1 = proximity
+        if earlier:
+            db = np.stack([self._sc_db[self._sc_db_indices.index(i)]
+                           for i in earlier])
+            dists, shifts = sc_mod.sc_distances_batch(db, sc_j)
+            for i, d, shift in zip(earlier, dists, shifts):
+                if d < self.sc_thresh:
+                    cand.append((0, float(d), i, float(shift) * 6.0))
         for i in earlier:
             d = float(np.linalg.norm(pos_j - self.poses[i][:3, 3]))
             if d < self.loop_dist:
-                prox.append((i, j, d, "proximity"))
-
-        sc_hits = []
-        rk_j = self.kf_desc[j]["ring_key"]
-        shortlist = sorted(
-            ((i, float(np.linalg.norm(rk_j - self.kf_desc[i]["ring_key"])))
-             for i in earlier),
-            key=lambda x: x[1])[:self.sc_shortlist]
-        for i, _ in shortlist:
-            d, shift = sc_mod.sc_distance(self.kf_desc[i]["sc"], self.kf_desc[j]["sc"])
-            if d < self.sc_thresh:
-                yaw_hint = shift * 6.0  # 360 deg / 60 sectors
-                sc_hits.append((i, j, d, f"sc(yaw_hint={yaw_hint:.0f}deg)"))
+                cand.append((1, d / self.loop_dist, i, None))
+        cand.sort(key=lambda c: (c[0], c[1]))
 
         added = 0
-        for i, j_, d, src in sorted(prox, key=lambda x: x[2]) + \
-                sorted(sc_hits, key=lambda x: x[2]):
+        for tier, score, i, yaw_hint in cand:
             if added >= self.max_per_kf:
                 break
-            if self._verified + self._queue.qsize() >= self.max_total:
-                break
-            key = (min(i, j_), max(i, j_))
+            key = (min(i, j), max(i, j))
             if key in self._proposed:
                 continue
             self._proposed.add(key)
-            self._queue.put(key)
             added += 1
-            self.get_logger().info(
-                f"candidate ({key[0]}, {key[1]}) proposed by {src} (d={d:.3f})")
+            src = ("proximity" if tier == 1
+                   else f"sc(yaw_hint={yaw_hint:.0f}deg)")
+            for qi, qj, qtier, qscore in self.gate.add(key[0], key[1],
+                                                       tier, score):
+                qkey = (qi, qj)
+                if qkey in self._queued_pairs:
+                    continue
+                if (self.max_total > 0 and
+                        self._verified + self._queue.qsize() >= self.max_total):
+                    break
+                self._queued_pairs.add(qkey)
+                self._queue.put(((qtier, qscore, self._qc), qkey))
+                self._qc += 1
+                self.get_logger().info(
+                    f"candidate ({qkey[0]}, {qkey[1]}) queued by {src} "
+                    f"(score={qscore:.3f})")
 
     # ------------------------------------------------------------------
     # Worker thread: RAP verification + PGO (via rap_server)
@@ -440,10 +477,16 @@ class LoopClosureNode(Node):
         self.get_logger().info("RAP server connected")
 
         pgo_pending = False
+        pgo_since = 0.0
         was_busy = False
         while not self._stop.is_set():
+            # A busy queue must not starve PGO forever: force the pending
+            # optimization once it has waited pgo_max_wait seconds.
+            if pgo_pending and time.time() - pgo_since > self.pgo_max_wait:
+                self._run_pgo(client)  # also republishes the map
+                pgo_pending = False
             try:
-                i, j = self._queue.get(timeout=0.5)
+                _, (i, j) = self._queue.get(timeout=0.5)
             except queue.Empty:
                 if pgo_pending:
                     self._run_pgo(client)  # also republishes the map
@@ -459,6 +502,8 @@ class LoopClosureNode(Node):
                 continue
             was_busy = True
             if self._verify_pair(client, i, j):
+                if not pgo_pending:
+                    pgo_since = time.time()
                 pgo_pending = True
         self.get_logger().info("Loop worker stopped")
 

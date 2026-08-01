@@ -108,9 +108,16 @@ PIDS+=($!)
 # queue to drain (RAP checks still running after the last scan). Note:
 # "Loop worker idle" is only logged after at least one verification ran;
 # if no candidates are ever proposed this wait simply times out.
+# Drain detection counts "Loop worker idle" lines: an idle message logged
+# DURING playback must not end the wait early (the priority queue can go
+# momentarily idle mid-run and then refill). DRAIN_SECS (default 180)
+# bounds the wait — the 2026-07-31 retrieval rework deliberately leaves a
+# bounded backlog on long urban sequences (KITTI 02: ~3-5 min of drain).
 sleep $((N / ${RATE%.*} + 15))
-for _ in $(seq 1 180); do
-  grep -q "Loop worker idle" "$LOG_DIR/loop_node_$SUFFIX.log" 2>/dev/null && break
+IDLE0=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node_$SUFFIX.log" 2>/dev/null || echo 0)
+for _ in $(seq 1 "${DRAIN_SECS:-180}"); do
+  IDLE1=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node_$SUFFIX.log" 2>/dev/null || echo 0)
+  [ "$IDLE1" -gt "$IDLE0" ] && break
   sleep 1
 done
 
