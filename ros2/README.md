@@ -313,3 +313,35 @@ fail with "Permission denied" on the rap_server launch.
   hiccup from dropping frames. Use 10–12 Hz for full-segment runs.
 - Headless check (no GUI): run the player, then
   `ros2 topic hz /points_raw` / `ros2 topic echo --once --field width /points_raw`.
+
+## Streaming retrieval rework (2026-08-01, commit b39d116)
+
+`loop_closure_node.py` no longer uses the ring-key shortlist. Retrieval is
+now: full-scan vectorized SC matching (`scan_context.sc_distances_batch`)
+against ALL earlier keyframes -> `rap_slam/cluster_gate.ClusterGate`
+(strong SC < `sc_strong` 0.12 and proximity hits queue immediately and
+uncapped; weaker SC hits need a `min_cluster`=2 (i,j)-cluster, capped at 2
+promotions/cluster with 25-scan spacing) -> best-first `PriorityQueue` ->
+RAP verification (overlap>=0.7 AND mean_dist<=2.5) -> GTSAM PGO (runs when
+the queue empties OR `pgo_max_wait`=30 s after the first pending loop).
+`max_total` now defaults to 0 (unlimited; the old hard budget was what
+killed KITTI 02). Offline policy simulator: `scripts/eval_streaming_retrieval.py
+--preset {kitti02,poss} [--keyframes-json auto] [--sweep]` (no GPU/ROS).
+
+Live results: POSS regression PASS (2/2 loops, PGO APE 1.757 m = baseline);
+KITTI 02 @10 Hz clean run: 182 accepted / 84 rejected, odom APE 31.640 m ->
+PGO 27.387 m. Old policy on the same data proposed 0/37 true pairs.
+
+New gotchas:
+- **Odometry node drops frames under CPU contention** (`queue_depth=1` is
+  deliberate). Dropped frames shift GT correspondence and make the verify
+  script's APE meaningless (60 m artifact on KITTI 02). If a run shows
+  `dropped>0` in the loop node log, re-run at 10 Hz; the drop-aware fallback
+  is `scripts/eval_live_dropped.py` (coarse checks only — publish jitter
+  defeats exact timestamp-to-frame recovery).
+- **Verify scripts delete the previous run's products at startup**
+  (`rm -f` accepted_loops.json / keyframes.json / map_poses.txt / PLY in
+  `output_ros2/step3*/`). Copy anything you need before re-running.
+- Drain wait: `DRAIN_SECS` env knob; the wait now counts `Loop worker idle`
+  lines so a mid-playback idle cannot end it early. KITTI 02's backlog
+  drains ~4 min after playback.
