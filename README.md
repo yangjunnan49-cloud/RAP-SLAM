@@ -153,8 +153,8 @@ RAP-SLAM/
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。
 
 - **RC-1 ✅ 2026-08-01 —— 后端消费 RAP 逐边诊断**：PGO 回环边信息加权 = floor-relative 自适应 σ（`relfloor`，scale = clip(mean_dist/1.0 m, 1, 3)）+ Huber(k=1) 鲁棒核（`pose_graph.py` 默认，经 `rap_server.py` / 节点 `pgo_*` 参数 / `run_pipeline.py` 全线接通）。依据 `scripts/eval_pgo_robust.py`（182 条 KITTI-02 + 2 条 POSS 已存边）：KITTI-02 APE 27.387→**26.423 m**，POSS 逐位不变 **1.757 m**；50% 边被 5 m σ 污染时鲁棒核保持 ~25 m（固定加权爆到 80 m+）。诊断→误差相关性弱（r≈0.25），故只做"只松不紧"的 floor-relative 放宽；绝对自适应（`--loop-weighting adaptive`）在 KITTI 上最优（25.688 m）但 POSS 回退 1.961 m，保留为调参项。
-- **RC-2 ⏭ 下一步 —— SC yaw-hint → RAP 预旋转**：Scan Context 已产出逐对 yaw 估计（列移 × 6°，目前仅记日志）。验证前将 b 帧预旋转，扩大 RAP 在大旋角重访（反向街道，正是 KITTI-02 的混叠形态）上的收敛域。先做离线重打分对照，再 live 复跑。
-- **RC-3 —— 多生成置信度**：`n_generations=k`，用生成间位姿离散度作验收门信号和 PGO σ——把 RAP 的采样随机性变成免费的不确定性估计。
+- **RC-2 ✅ 2026-08-01（证伪）—— SC yaw-hint → RAP 预旋转**：零收益——RAP 在实践中偏航不变（`scripts/eval_yaw_prehint*.py`），保持仅日志诊断，不接入。
+- **RC-3 ✅ 2026-08-08 —— 多生成置信度**：`register_consistent(k)` 多次生成一致性（`rap_backend.py`；离线 `--multigen-k`，live 节点 `multigen_k`/`min_overlap_min`/`max_disp_r` 参数，默认 k=1 关闭）。依据 `scripts/eval_multigen_confidence.py`（195 对 × 4 代）：**验收门加固价值大**——跨代最小 overlap 干净分离真/假回环（真 0.661–0.979 vs 假 0.031–0.156，对比单代假回环曾达 0.64、边际仅 0.06），并暴露 90° 双稳态偏航翻转；**PGO σ 价值微弱**（离散度 vs 真实误差 ρ=+0.165 < mean_dist 的 +0.245，APE 增益 ≤0.1 m）；best-of-k 估计 KITTI −0.45 m 但 POSS 金标准 1.757→1.827 退化，未作默认。黄金回归：multigen k=3 POSS 4/4 / KITTI-06 12/12 全接受，默认 k=1 路径 POSS 1.821 m 逐位复现。产品：`output_multigen/`。
 - **RC-4 —— 分层 N 路后端**：回环簇内 `register_multi` 联合配准（5–7 帧布局 rmse 0.145 m、环一致）+ 簇间 PGO 缝合。RAP 从两两验证器升级为子图优化器。已知约束：82 帧一次性配准全局翘曲（55 m）；簇门 (i,j)-cluster 是天然的批次单元。
 - **RC-5 —— 稀疏里程计精化（探索性）**：长无重访段（如 KITTI-02 帧 0–900 / 2000–3400）关键帧对 RAP 精化里程计边；~1 s/次，只能稀疏用。排在 RC-2/RC-3 量化单次可靠性之后。
 

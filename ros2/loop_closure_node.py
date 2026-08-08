@@ -229,6 +229,13 @@ class LoopClosureNode(Node):
         self.declare_parameter("sc_max_radius", 80.0)
         self.declare_parameter("min_overlap", 0.7)   # acceptance gate (see below)
         self.declare_parameter("max_mean_dist", 2.5)  # m; 0 disables the 2nd gate
+        # RC-3 (2026-08-08, eval_multigen_confidence.py): optional
+        # multi-generation consistency gate. k=1 keeps the single-gen gate.
+        # k>1: accept iff overlap_min across gens >= min_overlap_min AND
+        # mean_dist gate AND disp_r <= max_disp_r (90-deg yaw-flip guard).
+        self.declare_parameter("multigen_k", 1)
+        self.declare_parameter("min_overlap_min", 0.4)
+        self.declare_parameter("max_disp_r", 30.0)
         self.declare_parameter("max_per_kf", 3)      # candidate budget per keyframe
         self.declare_parameter("max_total", 0)       # total verification budget (0 = unlimited)
         # Retrieval rework 2026-07-31: full-scan SC + cluster-persistence gate.
@@ -268,6 +275,9 @@ class LoopClosureNode(Node):
         self.sc_max_radius = float(gp("sc_max_radius").value)
         self.min_overlap = float(gp("min_overlap").value)
         self.max_mean_dist = float(gp("max_mean_dist").value)
+        self.multigen_k = int(gp("multigen_k").value)
+        self.min_overlap_min = float(gp("min_overlap_min").value)
+        self.max_disp_r = float(gp("max_disp_r").value)
         self.max_per_kf = int(gp("max_per_kf").value)
         self.max_total = int(gp("max_total").value)
         self.pgo_max_wait = float(gp("pgo_max_wait").value)
@@ -531,6 +541,7 @@ class LoopClosureNode(Node):
                 "cmd": "register",
                 "points_a": self.kf_scans[i],
                 "points_b": self.kf_scans[j],
+                "k": self.multigen_k,
             })
         except (ConnectionError, RuntimeError) as e:
             self.get_logger().error(f"verification of ({i}, {j}) failed: {e}")
@@ -553,22 +564,42 @@ class LoopClosureNode(Node):
         # urban false hits reached overlap 0.64 / mean_dist 1.26 m, so the
         # overlap threshold carries the separation: gap is 0.64 < t < 0.76).
         # Odometry consistency stays diagnostic-only (offline lesson).
-        ok = (overlap >= self.min_overlap and
-              (self.max_mean_dist <= 0.0 or mean_dist <= self.max_mean_dist))
+        # RC-3 (2026-08-08): with multigen_k>1 the gate instead uses
+        # cross-generation consistency (overlap_min, disp_r) — false loops
+        # are unstable across generations, true loops reproduce.
+        extra = ""
+        if self.multigen_k > 1 and "overlap_min" in resp:
+            ok = (resp["overlap_min"] >= self.min_overlap_min and
+                  (self.max_mean_dist <= 0.0 or mean_dist <= self.max_mean_dist)
+                  and resp["disp_r"] <= self.max_disp_r)
+            extra = (f" | multigen k={resp['n_generations']} "
+                     f"overlap_min={resp['overlap_min']:.2f} "
+                     f"disp_t={resp['disp_t']:.2f} m "
+                     f"disp_r={resp['disp_r']:.1f} deg")
+        else:
+            ok = (overlap >= self.min_overlap and
+                  (self.max_mean_dist <= 0.0 or mean_dist <= self.max_mean_dist))
         self.get_logger().info(
             f"pair ({i:3d}, {j:3d}): overlap={overlap:.2f} "
             f"mean_dist={mean_dist:.2f} m "
             f"odom-consistency dT={trans_err:.2f} m dR={rot_err:.1f} deg "
-            f"[{resp['t_infer']:.1f} s infer, {time.time() - t0:.1f} s total] "
-            f"=> {'ACCEPT' if ok else 'reject'}")
+            f"[{resp['t_infer']:.1f} s infer, {time.time() - t0:.1f} s total]"
+            f"{extra} => {'ACCEPT' if ok else 'reject'}")
         if not ok:
             return False
-        self.loops.append({
+        loop_entry = {
             "i": i, "j": j, "T_rel": T_rel, "overlap": overlap,
             "mean_dist": mean_dist,
             "odom_trans_err": trans_err, "odom_rot_err_deg": rot_err,
             "t_infer": resp["t_infer"],
-        })
+        }
+        if self.multigen_k > 1 and "overlap_min" in resp:
+            loop_entry.update({
+                "overlap_min": resp["overlap_min"],
+                "disp_t": resp["disp_t"], "disp_r": resp["disp_r"],
+                "n_generations": resp["n_generations"],
+            })
+        self.loops.append(loop_entry)
         return True
 
     def _run_pgo(self, client):

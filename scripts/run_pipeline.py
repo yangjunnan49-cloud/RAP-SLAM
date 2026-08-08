@@ -66,6 +66,16 @@ def parse_args():
     p.add_argument("--min-overlap", type=float, default=0.7)
     p.add_argument("--max-mean-dist", type=float, default=2.5,
                    help="loop acceptance: max mean symmetric NN distance (m); 0 disables")
+    # RC-3 (2026-08-08): optional multi-generation consistency gate
+    # (eval_multigen_confidence.py). k=1 keeps the single-generation gate.
+    p.add_argument("--multigen-k", type=int, default=1,
+                   help="RAP generations per candidate; >1 switches the gate "
+                        "to cross-generation consistency (overlap_min, disp_r)")
+    p.add_argument("--min-overlap-min", type=float, default=0.4,
+                   help="multigen gate: min overlap across generations")
+    p.add_argument("--max-disp-r", type=float, default=30.0,
+                   help="multigen gate: max inter-generation rotation "
+                        "dispersion (deg); catches bistable yaw flips")
     # RAP-CORE PGO (2026-08-01): floor-relative adaptive sigmas from RAP
     # mean_dist + Huber; best cross-dataset combo (eval_pgo_robust.py:
     # KITTI-02 27.387 -> 26.423 m, POSS bit-identical 1.757 m).
@@ -218,6 +228,9 @@ def main():
                 rot_consistency_deg=args.rot_consistency,
                 min_overlap=args.min_overlap,
                 max_mean_dist=args.max_mean_dist,
+                multigen_k=args.multigen_k,
+                min_overlap_min=args.min_overlap_min,
+                max_disp_r=args.max_disp_r,
                 gt_poses=gt_poses)
         else:
             logger.info("No loop candidates found")

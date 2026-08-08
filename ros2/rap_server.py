@@ -90,8 +90,13 @@ class Worker:
     def _register(self, req: dict) -> dict:
         points_a = np.asarray(req["points_a"], dtype=np.float32)
         points_b = np.asarray(req["points_b"], dtype=np.float32)
-        T_rel, diag = self.rap.register(points_a, points_b)
-        return {
+        k = int(req.get("k", 1))  # RC-3: optional multi-generation verify
+        if k > 1:
+            T_rel, diag = self.rap.register_consistent(points_a, points_b,
+                                                       k=k)
+        else:
+            T_rel, diag = self.rap.register(points_a, points_b)
+        resp = {
             "ok": True,
             "T_rel": T_rel,
             "overlap": float(diag["overlap_ratio"]),
@@ -100,6 +105,14 @@ class Worker:
             "t_infer": float(diag["t_inference"]),
             "t_total": float(diag["t_total"]),
         }
+        if k > 1:
+            resp.update({
+                "overlap_min": float(diag["overlap_min"]),
+                "disp_t": float(diag["disp_t"]),
+                "disp_r": float(diag["disp_r"]),
+                "n_generations": int(diag["n_generations"]),
+            })
+        return resp
 
     def _pgo(self, req: dict) -> dict:
         from rap_slam.pose_graph import optimize_pose_graph

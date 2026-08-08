@@ -300,6 +300,51 @@ class RAPBackend:
         return T_rel, diag
 
     # ------------------------------------------------------------------
+    # Multi-generation consistency verification (RC-3, 2026-08-08).
+    # ------------------------------------------------------------------
+    def register_consistent(self, points_a: np.ndarray, points_b: np.ndarray,
+                            k: int = 3):
+        """Register the same pair k times and measure cross-generation
+        consistency. RAP sampling is stochastic; TRUE loops reproduce
+        across generations (min overlap 0.66-0.98 on KITTI-02) while FALSE
+        loops do not (min overlap 0.03-0.16, sometimes one lucky generation
+        reaching 0.64, plus 90-deg bistable yaw flips). Returns the
+        best-of-k result (max overlap, tie -> min mean_dist) with added
+        diagnostics: overlap_min, overlap_all, mean_dist_all, disp_t (m),
+        disp_r (deg). See scripts/eval_multigen_confidence.py."""
+        Ts, ovs, mds = [], [], []
+        t_infer = t_total = 0.0
+        for _ in range(int(k)):
+            T_rel, diag = self.register(points_a, points_b)
+            Ts.append(T_rel)
+            ovs.append(float(diag["overlap_ratio"]))
+            mds.append(float(diag["mean_dist"]))
+            t_infer += diag["t_inference"]
+            t_total += diag["t_total"]
+        best = max(range(len(Ts)), key=lambda x: (ovs[x], -mds[x]))
+        dt, dr = [], []
+        for a in range(len(Ts)):
+            for b in range(a + 1, len(Ts)):
+                dt.append(float(np.linalg.norm(Ts[a][:3, 3] - Ts[b][:3, 3])))
+                dR = Ts[a][:3, :3].T @ Ts[b][:3, :3]
+                c = (np.trace(dR) - 1.0) / 2.0
+                dr.append(float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))))
+        diag = {
+            "overlap_ratio": ovs[best],
+            "mean_dist": mds[best],
+            "overlap_min": float(np.min(ovs)),
+            "overlap_all": ovs,
+            "mean_dist_all": mds,
+            "disp_t": float(np.mean(dt)) if dt else 0.0,
+            "disp_r": float(np.mean(dr)) if dr else 0.0,
+            "n_generations": int(k),
+            "t_preprocess": 0.0,
+            "t_inference": t_infer,
+            "t_total": t_total,
+        }
+        return Ts[best], diag
+
+    # ------------------------------------------------------------------
     # N-way joint registration (RAP's native multi-part capability).
     # ------------------------------------------------------------------
     def register_multi(self, scans_points: list,

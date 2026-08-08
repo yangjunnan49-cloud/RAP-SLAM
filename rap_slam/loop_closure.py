@@ -75,6 +75,9 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
                       rot_consistency_deg: float = 25.0,
                       min_overlap: float = 0.7,
                       max_mean_dist: float = 2.5,
+                      multigen_k: int = 1,
+                      min_overlap_min: float = 0.4,
+                      max_disp_r: float = 30.0,
                       gt_poses: np.ndarray = None) -> List[dict]:
     """Verify loop candidates with RAP 2-way registration.
 
@@ -109,7 +112,11 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
     for (i, j) in pairs:
         t0 = time.time()
         try:
-            T_rel, diag = rap_backend.register(scans[i], scans[j])
+            if multigen_k > 1:
+                T_rel, diag = rap_backend.register_consistent(
+                    scans[i], scans[j], k=multigen_k)
+            else:
+                T_rel, diag = rap_backend.register(scans[i], scans[j])
         except Exception as e:
             logger.warning(f"RAP failed for pair ({i}, {j}): {e}")
             continue
@@ -136,19 +143,41 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
             gt_te = gt_re = None
 
         # odom-consistency is diagnostic-only (see docstring)
-        ok = (overlap >= min_overlap and
-              (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist))
+        # RC-3 (2026-08-08, eval_multigen_confidence.py): with k>1 the gate
+        # switches to CROSS-GENERATION consistency — false loops are
+        # unstable across generations (min overlap <= 0.16, 90-deg yaw
+        # flips) while true loops reproduce (min overlap >= 0.66), so
+        # min_overlap_min=0.4 has a huge two-sided margin vs the
+        # single-generation gate's 0.06.
+        if multigen_k > 1:
+            ok = (diag["overlap_min"] >= min_overlap_min and
+                  (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist) and
+                  diag["disp_r"] <= max_disp_r)
+            msg += (f" | multigen k={multigen_k} "
+                    f"overlap_min={diag['overlap_min']:.2f} "
+                    f"disp_t={diag['disp_t']:.2f} m "
+                    f"disp_r={diag['disp_r']:.1f} deg")
+        else:
+            ok = (overlap >= min_overlap and
+                  (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist))
         msg += " => ACCEPT" if ok else " => reject"
         logger.info(msg)
 
         if ok:
-            accepted.append({
+            entry = {
                 "i": i, "j": j, "T_rel": T_rel,
                 "overlap": overlap, "mean_dist": mean_dist,
                 "odom_trans_err": trans_err, "odom_rot_err_deg": rot_err,
                 "gt_trans_err": gt_te, "gt_rot_err_deg": gt_re,
                 "t_infer": diag["t_inference"],
                 "t_total": time.time() - t0,
-            })
+            }
+            if multigen_k > 1:
+                entry.update({
+                    "overlap_min": diag["overlap_min"],
+                    "disp_t": diag["disp_t"], "disp_r": diag["disp_r"],
+                    "n_generations": diag["n_generations"],
+                })
+            accepted.append(entry)
     logger.info(f"Accepted {len(accepted)}/{len(pairs)} loop closures")
     return accepted
