@@ -26,10 +26,13 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SEQ="${1:?usage: verify_step3_kitti.sh <seq> [n_frames] [rate]}"
 # Canonical full-sequence frame counts (verified against the dataset tree).
 case "$SEQ" in
+  00) N_FULL=4541 ;;
   01) N_FULL=1101 ;;
   02) N_FULL=4661 ;;
   03) N_FULL=801 ;;
   04) N_FULL=271 ;;
+  05) N_FULL=2761 ;;
+  06) N_FULL=1101 ;;
   *) echo "FAIL: unknown KITTI sequence '$SEQ'"; exit 1 ;;
 esac
 N="${2:-$N_FULL}"
@@ -114,9 +117,9 @@ PIDS+=($!)
 # bounds the wait — the 2026-07-31 retrieval rework deliberately leaves a
 # bounded backlog on long urban sequences (KITTI 02: ~3-5 min of drain).
 sleep $((N / ${RATE%.*} + 15))
-IDLE0=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node_$SUFFIX.log" 2>/dev/null || echo 0)
+IDLE0=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node_$SUFFIX.log" 2>/dev/null || true)
 for _ in $(seq 1 "${DRAIN_SECS:-180}"); do
-  IDLE1=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node_$SUFFIX.log" 2>/dev/null || echo 0)
+  IDLE1=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node_$SUFFIX.log" 2>/dev/null || true)
   [ "$IDLE1" -gt "$IDLE0" ] && break
   sleep 1
 done
