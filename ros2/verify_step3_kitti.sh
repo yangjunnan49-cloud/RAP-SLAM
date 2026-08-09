@@ -77,9 +77,11 @@ done
 grep -q "RAP server listening" "$LOG_DIR/rap_server_$SUFFIX.log" || {
   echo "FAIL: rap_server did not start; see $LOG_DIR/rap_server_$SUFFIX.log"; exit 1; }
 
-# 2. Odometry node.
+# 2. Odometry node. queue_depth=20: verification requires EVERY scan for
+# GT-comparable eval; depth 1 drops frames whenever a register spike exceeds
+# the frame period (observed up to 260 ms under the full Step-3 stack).
 python3 "$SCRIPT_DIR/odometry_node.py" \
-  --ros-args -p save_poses:="$LOG_DIR/live_poses_$SUFFIX.txt" \
+  --ros-args -p save_poses:="$LOG_DIR/live_poses_$SUFFIX.txt" -p queue_depth:=20 \
   > "$LOG_DIR/odom_node_$SUFFIX.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 60); do

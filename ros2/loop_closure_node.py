@@ -510,7 +510,7 @@ class LoopClosureNode(Node):
 
         pgo_pending = False
         pgo_since = 0.0
-        was_busy = False
+        idle_log = 0.0
         while not self._stop.is_set():
             # A busy queue must not starve PGO forever: force the pending
             # optimization once it has waited pgo_max_wait seconds.
@@ -526,13 +526,16 @@ class LoopClosureNode(Node):
                 elif self._map_request:
                     self._map_request = False
                     self._publish_map()
-                elif was_busy:
-                    was_busy = False
+                elif time.time() - idle_log >= 5.0:
+                    # Throttled idle heartbeat, not a one-shot transition log:
+                    # headless verify scripts count NEW idle lines after their
+                    # sampling point to detect queue drain, so the line must
+                    # repeat while the worker stays idle.
+                    idle_log = time.time()
                     self.get_logger().info(
                         f"Loop worker idle: verified={self._verified} "
                         f"accepted={len(self.loops)}")
                 continue
-            was_busy = True
             if self._verify_pair(client, i, j):
                 if not pgo_pending:
                     pgo_since = time.time()
