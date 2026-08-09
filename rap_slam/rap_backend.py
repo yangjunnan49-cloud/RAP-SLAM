@@ -435,6 +435,86 @@ class RAPBackend:
         }
         return T_parts, diag
 
+    # ------------------------------------------------------------------
+    # Global place descriptor (Direction B probe, 2026-08-09): pool the
+    # PointCloudDiT's per-point transformer features into one global
+    # descriptor per scan. ONE forward pass at t=0 with x = cond (the clean
+    # cloud) — no flow sampling, so it is deterministic per scan.
+    # ------------------------------------------------------------------
+    def extract_features(self, points: np.ndarray,
+                         max_points: Optional[int] = None,
+                         pooling: str = "meanmax"):
+        """Encode one unposed scan into a global place descriptor.
+
+        preprocess() -> single-part normalization -> one PointCloudDiT
+        forward (x = cond, t = 0, return_transformer_features) -> per-point
+        (M, 512) features -> pooled (mean / max / mean+max) -> L2-normalized.
+
+        Returns:
+            descriptor: (D,) float32 — 512-D (mean/max) or 1024-D (meanmax).
+            diagnostics: dict with n_points, timing, and "spinnet_mean":
+                the mean-pooled 32-D miniSpinNet input features (free
+                comparison arm — L2-normalized).
+        """
+        import torch
+
+        t_start = time.time()
+        ds, feat = self.preprocess(points, max_points=max_points)
+        t_prep = time.time() - t_start
+
+        cond, scale, offsets_c, counts, anchor_idx = self._normalize_parts([ds])
+        tp = int(counts[0])
+        anchor_indices = np.ones(tp, dtype=bool)  # single part => anchor
+
+        batch = {
+            "pointclouds": torch.from_numpy(cond).to(self.device),
+            "features": torch.from_numpy(feat.astype(np.float32)).to(self.device),
+            "scales": torch.tensor([scale], dtype=torch.float32,
+                                   device=self.device),
+            "anchor_indices": torch.from_numpy(anchor_indices).to(self.device),
+            "cu_seqlens": torch.tensor([0, tp], dtype=torch.int64,
+                                       device=self.device),
+        }
+
+        t_infer = time.time()
+        with torch.inference_mode(), torch.autocast(device_type=self.device.type,
+                                                    dtype=torch.float16,
+                                                    enabled=self.device.type == "cuda"):
+            out = self.model.flow_model(
+                x=batch["pointclouds"],
+                timesteps=torch.zeros(1, device=self.device),
+                cond_coord=batch["pointclouds"],
+                local_features=batch["features"],
+                latent_features=None,
+                scales=batch["scales"],
+                anchor_indices=batch["anchor_indices"],
+                cu_seqlens_batch=batch["cu_seqlens"].to(torch.int32),
+                cu_seqlens_part=batch["cu_seqlens"].to(torch.int32),
+                return_transformer_features=True,
+            )
+        tf = out["transformer_features"].float().cpu().numpy()  # (M, 512)
+        t_infer = time.time() - t_infer
+
+        mean_f = tf.mean(axis=0)
+        if pooling == "mean":
+            desc = mean_f
+        elif pooling == "max":
+            desc = tf.max(axis=0)
+        else:
+            desc = np.concatenate([mean_f, tf.max(axis=0)])
+        desc = desc / (np.linalg.norm(desc) + 1e-12)
+
+        sp = feat.mean(axis=0).astype(np.float32)
+        sp = sp / (np.linalg.norm(sp) + 1e-12)
+        diag = {
+            "n_points": tp,
+            "t_preprocess": t_prep,
+            "t_inference": t_infer,
+            "t_total": time.time() - t_start,
+            "spinnet_mean": sp,
+        }
+        return desc.astype(np.float32), diag
+
     @staticmethod
     def _alignment_metrics(ds_a: np.ndarray, ds_b: np.ndarray, T_rel: np.ndarray,
                            thresh: float = 1.0) -> Tuple[float, float]:

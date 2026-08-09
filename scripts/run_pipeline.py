@@ -241,6 +241,19 @@ def main():
             logger.info("No loop candidates found")
     timings["loop_closure"] = time.time() - t0
 
+    # Persist reusable loop-closure products for offline backend experiments
+    # (eval_hier_nway.py / eval_submap_nway.py): keyframe list + accepted loop
+    # edges with T_rel / overlap / mean_dist (same schema as the ROS 2 live
+    # products in output_ros2/step3*/).
+    with open(os.path.join(args.output, "keyframes.json"), "w") as f:
+        json.dump([int(k) for k in keyframes], f)
+    with open(os.path.join(args.output, "accepted_loops.json"), "w") as f:
+        json.dump([{k: (v.tolist() if isinstance(v, np.ndarray)
+                        else float(v) if isinstance(v, np.floating)
+                        else int(v) if isinstance(v, np.integer)
+                        else v)
+                    for k, v in lc.items()} for lc in accepted], f)
+
     # ------------------------------------------------------------ 5. PGO
     logger.info("=" * 70)
     logger.info("STAGE 5: pose-graph optimization")
