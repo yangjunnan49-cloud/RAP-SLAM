@@ -131,11 +131,16 @@ class Worker:
             dcs_phi=float(req.get("dcs_phi", 10.0)),
             relfloor_ref=float(req.get("relfloor_ref", 1.0)),
             relfloor_cap=float(req.get("relfloor_cap", 3.0)),
+            # Live default 10 (2026-08-08 NMS finding): the streaming
+            # retrieval emits dense same-site edge clusters; offline
+            # clients pass 0 to keep the golden regressions bit-exact.
+            loop_nms_width=float(req.get("loop_nms_width", 10.0)),
         )
         logger.info(f"PGO: {len(req['keyframes'])} nodes, "
                     f"{len(req['loops'])} loop edges "
                     f"(weighting={req.get('loop_weighting', 'fixed')}, "
-                    f"kernel={req.get('robust_kernel')}), "
+                    f"kernel={req.get('robust_kernel')}, "
+                    f"nms_w={req.get('loop_nms_width', 10.0)}), "
                     f"{time.time() - t0:.2f} s")
         return {"ok": True, "optimized": optimized}
 

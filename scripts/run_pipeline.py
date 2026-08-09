@@ -88,6 +88,11 @@ def parse_args():
                    help="reference RAP mean_dist (m) for relfloor weighting")
     p.add_argument("--relfloor-cap", type=float, default=3.0,
                    help="max sigma loosening factor for relfloor weighting")
+    p.add_argument("--loop-nms-width", type=float, default=0.0,
+                   help="(i,j)-space NMS width (scans) on accepted loop edges "
+                        "before PGO; 0 = off. Live default is 10 (dense "
+                        "same-site clusters); offline is budget-capped, so "
+                        "off keeps the golden regressions bit-exact")
     p.add_argument("--robust-kernel", choices=["none", "huber", "dcs"],
                    default="huber", help="robust mEstimator on loop edges")
     p.add_argument("--huber-k", type=float, default=1.0)
@@ -248,7 +253,8 @@ def main():
         huber_k=args.huber_k,
         dcs_phi=args.dcs_phi,
         relfloor_ref=args.relfloor_ref,
-        relfloor_cap=args.relfloor_cap)
+        relfloor_cap=args.relfloor_cap,
+        loop_nms_width=args.loop_nms_width)
     opt_poses = pose_graph.propagate_to_full_trajectory(odom_poses, keyframes,
                                                         optimized_kf)
     sequence.save_kitti_poses(np.stack(opt_poses),

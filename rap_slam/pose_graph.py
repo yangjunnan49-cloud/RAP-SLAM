@@ -17,6 +17,17 @@ Empirical basis (scripts/eval_pgo_robust.py, 182 KITTI-02 + 2 POSS edges):
   default relfloor(ref=1.0, cap=3.0) + Huber(k=1): KITTI 27.387 -> 26.423 m,
   POSS bit-identical 1.757 m; robust kernels stay ~25 m under 50% edge
   corruption at 5 m sigma where the fixed baseline explodes past 80 m.
+
+Loop-edge NMS (2026-08-08, scripts/eval_loop_edge_nms.py): dense same-site
+loop clusters from the streaming retrieval (KITTI-06 live: 114 edges at one
+revisit site) over-constrain PGO when treated as independent — live PGO
+3.221 m was WORSE than odometry 2.777 m. Greedy (i,j)-space NMS (keep the
+highest-overlap edge per Chebyshev-w cell) at w=10 scans fixes it (06:
+2.573 m, below odometry), improves KITTI-02 (182->38 edges, 26.423->26.018
+m) and is a no-op on sparse edge sets (POSS live 1.757 m bit-identical).
+Default OFF here (loop_nms_width=0 keeps the offline goldens bit-exact);
+the LIVE path opts in at w=10 (its cluster-persistence retrieval is
+deliberately uncapped; the offline pipeline is budget-capped).
 """
 
 import logging
@@ -46,6 +57,22 @@ def _loop_noise(lc, base_sigmas, weighting, alpha_t, alpha_r,
     return noiseModel.Diagonal.Sigmas(sigmas)
 
 
+def nms_loop_edges(loop_constraints: List[dict],
+                   width: float) -> List[dict]:
+    """Greedy (i,j)-space NMS over accepted loop edges, highest overlap
+    first: suppress a candidate when an already-selected edge lies within
+    `width` scans in BOTH indices (|i-i'| <= w AND |j-j'| <= w). width=0
+    removes only exact (i,j) duplicates. See the module docstring for the
+    empirical basis (w=10 fixes dense-cluster over-weighting).
+    """
+    kept: List[dict] = []
+    for lc in sorted(loop_constraints, key=lambda e: -e.get("overlap", 0.0)):
+        if all(abs(lc["i"] - k["i"]) > width or abs(lc["j"] - k["j"]) > width
+               for k in kept):
+            kept.append(lc)
+    return kept
+
+
 def optimize_pose_graph(
     odom_poses: List[np.ndarray],
     keyframes: List[int],
@@ -61,6 +88,7 @@ def optimize_pose_graph(
     adaptive_alpha_r: float = 0.15,
     relfloor_ref: float = 1.0,
     relfloor_cap: float = 3.0,
+    loop_nms_width: float = 0.0,
 ) -> Dict[int, np.ndarray]:
     """Optimize a keyframe pose graph.
 
@@ -113,7 +141,13 @@ def optimize_pose_graph(
         T_rel = np.linalg.inv(odom_poses[a]) @ odom_poses[b]
         graph.add(BetweenFactorPose3(a, b, Pose3(T_rel), odom_noise))
 
-    # RAP loop-closure edges (optionally RAP-adaptive + robust-kernelled).
+    # RAP loop-closure edges (optionally NMS-deduped, RAP-adaptive +
+    # robust-kernelled).
+    if loop_nms_width and loop_nms_width > 0:
+        n_before = len(loop_constraints)
+        loop_constraints = nms_loop_edges(loop_constraints, loop_nms_width)
+        logger.info(f"Loop-edge NMS (w={loop_nms_width}): "
+                    f"{n_before} -> {len(loop_constraints)} edges")
     for lc in loop_constraints:
         i, j = lc["i"], lc["j"]
         if i not in kf_set or j not in kf_set:

@@ -256,6 +256,10 @@ class LoopClosureNode(Node):
         self.declare_parameter("pgo_dcs_phi", 10.0)
         self.declare_parameter("pgo_relfloor_ref", 1.0)  # m
         self.declare_parameter("pgo_relfloor_cap", 3.0)
+        # Loop-edge NMS width (scans), live default 10: the streaming
+        # retrieval's dense same-site clusters must not enter PGO as
+        # independent constraints (2026-08-08 KITTI-06 finding).
+        self.declare_parameter("pgo_loop_nms_width", 10.0)
         self.declare_parameter("save_dir", "")
         # Accumulated-map publication (/map_cloud):
         self.declare_parameter("map_voxel", 0.3)     # per-scan pre-downsample (m)
@@ -287,6 +291,7 @@ class LoopClosureNode(Node):
         self.pgo_dcs_phi = float(gp("pgo_dcs_phi").value)
         self.pgo_relfloor_ref = float(gp("pgo_relfloor_ref").value)
         self.pgo_relfloor_cap = float(gp("pgo_relfloor_cap").value)
+        self.pgo_loop_nms_width = float(gp("pgo_loop_nms_width").value)
         self.gate = ClusterGate(
             window=int(gp("cluster_w").value),
             min_cluster=int(gp("min_cluster").value),
@@ -606,9 +611,12 @@ class LoopClosureNode(Node):
         kfs = list(self.keyframes)
         odom_kf = {k: self.poses[k] for k in kfs}
         # mean_dist rides along: the server's PGO uses it for RAP-adaptive
-        # per-edge sigmas when pgo_loop_weighting=adaptive.
+        # per-edge sigmas when pgo_loop_weighting=adaptive. overlap rides
+        # along for the server's loop-edge NMS (keep the highest-overlap
+        # edge per (i,j) cell when pgo_loop_nms_width > 0).
         loops = [{"i": lc["i"], "j": lc["j"], "T_rel": lc["T_rel"],
-                  "mean_dist": lc.get("mean_dist", 0.5)}
+                  "mean_dist": lc.get("mean_dist", 0.5),
+                  "overlap": lc.get("overlap", 0.0)}
                  for lc in self.loops]
         t0 = time.time()
         try:
@@ -619,7 +627,8 @@ class LoopClosureNode(Node):
                                    "huber_k": self.pgo_huber_k,
                                    "dcs_phi": self.pgo_dcs_phi,
                                    "relfloor_ref": self.pgo_relfloor_ref,
-                                   "relfloor_cap": self.pgo_relfloor_cap})
+                                   "relfloor_cap": self.pgo_relfloor_cap,
+                                   "loop_nms_width": self.pgo_loop_nms_width})
         except (ConnectionError, RuntimeError) as e:
             self.get_logger().error(f"PGO request failed: {e}")
             return
