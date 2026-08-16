@@ -83,6 +83,10 @@ class KissOdometryNode(Node):
         self.declare_parameter("max_range", 80.0)
         self.declare_parameter("min_range", 1.5)
         self.declare_parameter("voxel_size", 0.8)
+        # Motion compensation: synthesize per-point azimuth timestamps and
+        # enable KISS-ICP deskew (real spinning-LiDAR scans only). Default off
+        # to preserve the verified golden trajectories bit-exact.
+        self.declare_parameter("deskew", False)
         # Subscriber queue depth. 1 = always take the newest scan (drop frames
         # under CPU load instead of building up lag); raise it if every scan
         # must be processed and the CPU keeps up.
@@ -99,6 +103,7 @@ class KissOdometryNode(Node):
             max_range=float(self.get_parameter("max_range").value),
             min_range=float(self.get_parameter("min_range").value),
             voxel_size=float(self.get_parameter("voxel_size").value),
+            deskew=bool(self.get_parameter("deskew").value),
         )
 
         depth = int(self.get_parameter("queue_depth").value)

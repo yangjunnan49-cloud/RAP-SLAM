@@ -115,6 +115,10 @@ def parse_args():
                    help="apply Tr velo<->cam conversion (KITTI convention; "
                         "POSS poses are already in the LiDAR/world frame)")
     p.add_argument("--odom-max-range", type=float, default=80.0)
+    p.add_argument("--deskew", action="store_true",
+                   help="synthesize per-point azimuth timestamps and enable "
+                        "KISS-ICP motion compensation (real spinning-LiDAR "
+                        "scans only; simulated scans have no distortion)")
     return p.parse_args()
 
 
@@ -185,7 +189,8 @@ def main():
     logger.info("STAGE 2: odometry")
     t0 = time.time()
     odom_poses, backend_name = odometry.run_odometry(
-        scans, max_range=getattr(args, "odom_max_range", 80.0))
+        scans, max_range=getattr(args, "odom_max_range", 80.0),
+        deskew=getattr(args, "deskew", False))
     sequence.save_kitti_poses(np.stack(odom_poses),
                               os.path.join(args.output, "odom_poses.txt"))
     timings["odometry"] = time.time() - t0

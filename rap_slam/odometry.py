@@ -13,26 +13,46 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def synthesize_timestamps_from_azimuth(scan: np.ndarray) -> np.ndarray:
+    """Synthesize per-point timestamps from azimuth, normalized to [0, 1].
+
+    KITTI/POSS `.bin` scans carry xyzi only — no per-point time. Velodyne-style
+    sensors rotate clockwise seen from above, so acquisition time increases as
+    atan2(y, x) decreases. Same convention as kiss_icp.datasets.kitti_raw
+    (`yaw = -arctan2(y, x); t = 0.5 * (yaw / pi + 1)`), which is what KISS-ICP's
+    C++ deskew preprocessor expects (fraction of the scan period).
+    """
+    yaw = -np.arctan2(scan[:, 1], scan[:, 0])
+    return 0.5 * (yaw / np.pi + 1.0)
+
+
 class KissOdometry:
     """KISS-ICP odometry wrapper (kiss-icp >= 1.3)."""
 
     def __init__(self, max_range: float = 60.0, min_range: float = 1.5,
-                 voxel_size: float = 0.8):
+                 voxel_size: float = 0.8, deskew: bool = False):
         from kiss_icp.config import KISSConfig
         from kiss_icp.kiss_icp import KissICP
 
         cfg = KISSConfig()
         cfg.data.max_range = float(max_range)
         cfg.data.min_range = float(min_range)
-        cfg.data.deskew = False  # simulated scans carry no motion distortion
+        # Deskew needs per-point timestamps; with deskew=False zeros are passed
+        # and the C++ preprocessor skips motion compensation entirely (this
+        # preserves the pre-deskew golden code path bit-exact).
+        cfg.data.deskew = bool(deskew)
         cfg.mapping.voxel_size = float(voxel_size)  # must be set explicitly
         self._odom = KissICP(cfg)
+        self._deskew = bool(deskew)
         self._poses: List[np.ndarray] = []
-        self.backend_name = "kiss-icp"
+        self.backend_name = "kiss-icp" + ("+deskew" if self._deskew else "")
 
     def register(self, scan: np.ndarray) -> np.ndarray:
         """Register one scan (N, 3) and return the current sensor-to-world pose."""
-        timestamps = np.zeros(len(scan), dtype=np.float64)
+        if self._deskew:
+            timestamps = synthesize_timestamps_from_azimuth(scan)
+        else:
+            timestamps = np.zeros(len(scan), dtype=np.float64)
         self._odom.register_frame(scan.astype(np.float64), timestamps)
         pose = np.asarray(self._odom.last_pose, dtype=np.float64)
         self._poses.append(pose)
@@ -86,8 +106,12 @@ class Open3DICPOdometry:
 
 
 def run_odometry(scans: List[np.ndarray], prefer_kiss: bool = True,
-                 max_range: float = 60.0) -> tuple:
+                 max_range: float = 60.0, deskew: bool = False) -> tuple:
     """Run odometry over all scans.
+
+    deskew: synthesize per-point azimuth timestamps and enable KISS-ICP motion
+        compensation. Leave False for simulated scans (no motion distortion)
+        and to reproduce pre-deskew goldens bit-exact.
 
     Returns:
         poses: list of (4, 4) sensor-to-world poses (len == len(scans)).
@@ -96,7 +120,7 @@ def run_odometry(scans: List[np.ndarray], prefer_kiss: bool = True,
     backend = None
     if prefer_kiss:
         try:
-            candidate = KissOdometry(max_range=max_range)
+            candidate = KissOdometry(max_range=max_range, deskew=deskew)
             candidate.register(scans[0])  # smoke-test on the first scan
             backend = candidate
         except Exception as e:
