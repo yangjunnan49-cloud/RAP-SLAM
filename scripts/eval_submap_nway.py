@@ -132,7 +132,18 @@ def parse_args():
     p.add_argument("--min-cluster", type=int, default=3,
                    help="clusters smaller than this keep pairwise measurements")
     p.add_argument("--max-parts", type=int, default=16,
-                   help="trim bigger clusters to the N highest-degree members")
+                   help="max parts per register_multi call (bigger clusters "
+                        "are split per --compose)")
+    p.add_argument("--compose", choices=["degree", "chain"], default="degree",
+                   help="batch composition for clusters bigger than "
+                        "--max-parts. degree: keep the N highest-degree "
+                        "members (legacy — SHATTERS street chains: on "
+                        "kitti06_live's 97-member chain it left ZERO edges "
+                        "with both endpoints covered and warped the joint "
+                        "registration). chain: overlapping sliding windows "
+                        "over the PCA-1 chain order (chain-preserving)")
+    p.add_argument("--chain-overlap", type=int, default=0,
+                   help="overlap between chain windows; 0 = max_parts//2")
     p.add_argument("--points-budget", type=int, default=30000,
                    help="total points per cluster call; per-part cap = "
                         "min(4000, budget // n_parts)")
@@ -228,6 +239,49 @@ def mine_clusters(loops):
         clusters.append({"id": cid, "members": members, "edges": edge_ids,
                          "deg": deg})
     return clusters
+
+
+def chain_order(members, odom_poses):
+    """Order cluster members along the dominant spatial axis.
+
+    Street-chain clusters (a road revisited in the same or the opposite
+    direction) need chain-preserving batching: sorting members by their
+    PCA-1 projection of the odometry positions interleaves the passes in
+    spatial order, so sliding windows cover contiguous street segments and
+    loop edges — spatially adjacent by construction — keep both endpoints
+    inside one window.
+    """
+    pos = np.array([odom_poses[m][:3, 3] for m in members], dtype=float)
+    c = pos - pos.mean(axis=0, keepdims=True)
+    v1 = np.linalg.svd(c, full_matrices=False)[2][0]
+    s = c @ v1
+    return [m for _, m in sorted(zip(s.tolist(), members))]
+
+
+def compose_batches(members, deg, odom_poses, max_parts, compose,
+                    chain_overlap=0):
+    """Split a cluster's members into <=max_parts batches for register_multi.
+
+    Returns a list of sorted member lists.
+      degree: single batch of the highest-degree members (legacy).
+      chain:  overlapping sliding windows (size max_parts, stride
+              max_parts - overlap) over the PCA-1 chain order. Any member
+              pair within (max_parts - overlap) in chain order — in
+              particular spatially adjacent loop endpoints — shares a
+              window, so replacement edges always get coverage.
+    """
+    if len(members) <= max_parts:
+        return [sorted(members)]
+    if compose == "degree":
+        return [sorted(sorted(members, key=lambda s: -deg[s])[:max_parts])]
+    order = chain_order(members, odom_poses)
+    overlap = chain_overlap if chain_overlap > 0 else max_parts // 2
+    stride = max(1, max_parts - overlap)
+    last = len(order) - max_parts
+    starts = list(range(0, last + 1, stride))
+    if starts[-1] != last:
+        starts.append(last)  # tail window, full size
+    return [sorted(order[s:s + max_parts]) for s in starts]
 
 
 def full_traj_ape(odom_poses, keyframes, optimized, gt_rel):
@@ -476,52 +530,59 @@ def main():
                 n_regate = 0
                 for c in big:
                     members, deg = c["members"], c["deg"]
-                    trimmed = members
-                    if len(members) > args.max_parts:
-                        trimmed = sorted(sorted(members, key=lambda s: -deg[s])
-                                         [:args.max_parts])
+                    batches = compose_batches(members, deg, D.odom_poses,
+                                              args.max_parts, args.compose,
+                                              args.chain_overlap)
                     ptype = ("raw" if arm == "nway_raw" else "submap")
-                    key = (ptype, c["id"])
-                    if key not in T_parts_cache:
-                        parts = ([D.load_scan(s) for s in trimmed]
-                                 if ptype == "raw"
-                                 else [submaps[name][s] for s in trimmed])
-                        pps = min(4000, args.points_budget // len(trimmed))
-                        cache = os.path.join(
-                            args.output,
-                            f"{name}_{ptype}_c{c['id']}_seed{seed}.npz")
-                        if args.reuse_cache and os.path.exists(cache):
-                            z = np.load(cache)
-                            T_parts = [z["T_parts"][k]
-                                       for k in range(len(z["T_parts"]))]
-                            assert [int(k) for k in z["members"]] == trimmed
-                            t_infer = -1.0
-                        else:
-                            if rap is None or rap.seed != seed:
-                                from rap_slam.rap_backend import RAPBackend
-                                rap = RAPBackend(seed=seed)
-                            T_parts, diag = rap.register_multi(
-                                parts, max_points_per_scan=pps)
-                            t_infer = diag["t_inference"]
-                            np.savez(cache, T_parts=np.stack(T_parts),
-                                     members=np.array(trimmed))
-                        idx = {s: k for k, s in enumerate(trimmed)}
+                    # ---- register every batch (cached per batch) ----------
+                    # Single-batch clusters keep the legacy cache filename
+                    # (no _b suffix) so --reuse-cache still finds them.
+                    batch_data = []  # (idx, T_parts, layout_rmse) per batch
+                    for bi, batch in enumerate(batches):
+                        key = (ptype, c["id"], bi)
+                        if key not in T_parts_cache:
+                            parts = ([D.load_scan(s) for s in batch]
+                                     if ptype == "raw"
+                                     else [submaps[name][s] for s in batch])
+                            pps = min(4000, args.points_budget // len(batch))
+                            suffix = "" if len(batches) == 1 else f"_b{bi}"
+                            cache = os.path.join(
+                                args.output,
+                                f"{name}_{ptype}_c{c['id']}{suffix}"
+                                f"_seed{seed}.npz")
+                            if args.reuse_cache and os.path.exists(cache):
+                                z = np.load(cache)
+                                T_parts = [z["T_parts"][k]
+                                           for k in range(len(z["T_parts"]))]
+                                assert [int(k) for k in z["members"]] == batch
+                                t_infer = -1.0
+                            else:
+                                if rap is None or rap.seed != seed:
+                                    from rap_slam.rap_backend import RAPBackend
+                                    rap = RAPBackend(seed=seed)
+                                T_parts, diag = rap.register_multi(
+                                    parts, max_points_per_scan=pps)
+                                t_infer = diag["t_inference"]
+                                np.savez(cache, T_parts=np.stack(T_parts),
+                                         members=np.array(batch))
+                            idx = {s: k for k, s in enumerate(batch)}
 
-                        # oracle layout warp check
-                        pos = np.array([T_parts[idx[s]][:3, 3]
-                                        for s in trimmed])
-                        gtpos = np.array([D.gt[s][:3, 3] for s in trimmed])
-                        R_f, t_f = umeyama_se3(pos, gtpos)
-                        resid = np.linalg.norm((R_f @ pos.T).T + t_f - gtpos,
-                                               axis=1)
-                        layout_rmse = float(np.sqrt(np.mean(resid ** 2)))
-                        logger.info(
-                            f"  {name} {arm} cluster {c['id']}: "
-                            f"{len(members)}->{len(trimmed)} parts, "
-                            f"{pps} pts/part, infer {t_infer:.1f} s, "
-                            f"layout rmse {layout_rmse:.2f} m")
-                        T_parts_cache[key] = (idx, T_parts, layout_rmse)
-                    idx, T_parts, layout_rmse = T_parts_cache[key]
+                            # oracle layout warp check
+                            pos = np.array([T_parts[idx[s]][:3, 3]
+                                            for s in batch])
+                            gtpos = np.array([D.gt[s][:3, 3] for s in batch])
+                            R_f, t_f = umeyama_se3(pos, gtpos)
+                            resid = np.linalg.norm(
+                                (R_f @ pos.T).T + t_f - gtpos, axis=1)
+                            layout_rmse = float(np.sqrt(np.mean(resid ** 2)))
+                            logger.info(
+                                f"  {name} {arm} cluster {c['id']}{suffix or ' (single batch)'}: "
+                                f"{len(members)}->{len(batch)} parts"
+                                f"{f'/{len(batches)} batches' if suffix else ''}, "
+                                f"{pps} pts/part, infer {t_infer:.1f} s, "
+                                f"layout rmse {layout_rmse:.2f} m")
+                            T_parts_cache[key] = (idx, T_parts, layout_rmse)
+                        batch_data.append(T_parts_cache[key])
 
                     # replace accepted edges with cluster-consistent
                     # relatives — but RE-GATED intrinsically (Direction A
@@ -540,30 +601,39 @@ def main():
                     # md >= 2.14 -> gate ov >= 0.5 AND md <= 2.0 sits in
                     # both gaps. Warps fail BOTH criteria on 5/7 edges.
                     from rap_slam.rap_backend import RAPBackend
+                    batch_members = sorted({s for b in batches for s in b})
                     ds_parts = {s: (prep_for_metrics(D.load_scan(s))
                                     if ptype == "raw"
                                     else prep_for_metrics(submaps[name][s]))
-                                for s in trimmed}
+                                for s in batch_members}
                     for k in c["edges"]:
                         i, j = D.loops[k]["i"], D.loops[k]["j"]
-                        if i in idx and j in idx:
-                            T_new = (np.linalg.inv(T_parts[idx[i]])
-                                     @ T_parts[idx[j]])
-                            ov, md = RAPBackend._alignment_metrics(
-                                ds_parts[i], ds_parts[j], T_new, thresh=1.0)
-                            if ov < 0.5 or md > 2.0:
-                                n_regate += 1
-                                continue
-                            loops_new[k]["T_rel"] = T_new
-                            n_rep += 1
-                            te_n, re_n = rel_err(loops_new[k]["T_rel"],
-                                                 D.gt[i], D.gt[j])
-                            te_p, re_p = rel_err(D.loops[k]["T_rel"],
-                                                 D.gt[i], D.gt[j])
-                            edge_stats[k] = {"pair": (i, j),
-                                             "cluster": c["id"],
-                                             "pw_te": te_p, "nw_te": te_n,
-                                             "pw_re": re_p, "nw_re": re_n}
+                        # first batch containing BOTH endpoints (chain
+                        # windows guarantee coverage for chain-adjacent
+                        # loop endpoints)
+                        hit = next(((idx, T_parts)
+                                    for idx, T_parts, _ in batch_data
+                                    if i in idx and j in idx), None)
+                        if hit is None:
+                            continue
+                        idx, T_parts = hit
+                        T_new = (np.linalg.inv(T_parts[idx[i]])
+                                 @ T_parts[idx[j]])
+                        ov, md = RAPBackend._alignment_metrics(
+                            ds_parts[i], ds_parts[j], T_new, thresh=1.0)
+                        if ov < 0.5 or md > 2.0:
+                            n_regate += 1
+                            continue
+                        loops_new[k]["T_rel"] = T_new
+                        n_rep += 1
+                        te_n, re_n = rel_err(loops_new[k]["T_rel"],
+                                             D.gt[i], D.gt[j])
+                        te_p, re_p = rel_err(D.loops[k]["T_rel"],
+                                             D.gt[i], D.gt[j])
+                        edge_stats[k] = {"pair": (i, j),
+                                         "cluster": c["id"],
+                                         "pw_te": te_p, "nw_te": te_n,
+                                         "pw_re": re_p, "nw_re": re_n}
 
                     # clique arm: add ALL intra-cluster member pairs through
                     # the SAME acceptance gate (ungated clique edges from a
@@ -571,31 +641,38 @@ def main():
                     # Only pairs separated like loops — near-temporal members
                     # are already well constrained by odometry, and RC-5
                     # showed RAP relatives are noisier than KISS-ICP there.
+                    # With chain windows, only INTRA-batch pairs are added
+                    # (the batch is the jointly-registered unit); pairs in
+                    # the window overlap appear in two batches — dedupe via
+                    # `have`.
                     if arm == "submap_clique":
                         have = {tuple(sorted((e["i"], e["j"])))
                                 for e in loops_new}
-                        for ai in range(len(trimmed)):
-                            for bi in range(ai + 1, len(trimmed)):
-                                i, j = trimmed[ai], trimmed[bi]
-                                if j - i < 200:
-                                    continue
-                                if (i, j) in have:
-                                    continue
-                                T_rel = (np.linalg.inv(T_parts[idx[i]])
-                                         @ T_parts[idx[j]])
-                                ov, md = RAPBackend._alignment_metrics(
-                                    ds_parts[i], ds_parts[j], T_rel,
-                                    thresh=1.0)
-                                if ov < 0.5 or md > 2.0:
-                                    n_regate += 1
-                                    continue
-                                te, re = rel_err(T_rel, D.gt[i], D.gt[j])
-                                loops_new.append({
-                                    "i": i, "j": j, "T_rel": T_rel,
-                                    "overlap": ov, "mean_dist": md,
-                                    "gt_trans_err": te, "gt_rot_err_deg": re,
-                                    "source": "submap_clique"})
-                                n_clique += 1
+                        for idx, T_parts, _ in batch_data:
+                            trimmed = sorted(idx.keys())
+                            for ai in range(len(trimmed)):
+                                for bi in range(ai + 1, len(trimmed)):
+                                    i, j = trimmed[ai], trimmed[bi]
+                                    if j - i < 200:
+                                        continue
+                                    if (i, j) in have:
+                                        continue
+                                    T_rel = (np.linalg.inv(T_parts[idx[i]])
+                                             @ T_parts[idx[j]])
+                                    ov, md = RAPBackend._alignment_metrics(
+                                        ds_parts[i], ds_parts[j], T_rel,
+                                        thresh=1.0)
+                                    if ov < 0.5 or md > 2.0:
+                                        n_regate += 1
+                                        continue
+                                    te, re = rel_err(T_rel, D.gt[i], D.gt[j])
+                                    loops_new.append({
+                                        "i": i, "j": j, "T_rel": T_rel,
+                                        "overlap": ov, "mean_dist": md,
+                                        "gt_trans_err": te, "gt_rot_err_deg": re,
+                                        "source": "submap_clique"})
+                                    have.add((i, j))
+                                    n_clique += 1
                 opt_kf = pose_graph.optimize_pose_graph(
                     D.odom_poses, D.keyframes, loops_new,
                     loop_nms_width=D.nms)
