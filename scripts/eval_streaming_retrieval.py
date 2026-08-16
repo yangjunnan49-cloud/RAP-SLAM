@@ -90,6 +90,19 @@ def parse_args():
     # New policy: cluster-persistence gate
     p.add_argument("--sc-strong", type=float, default=0.12,
                    help="SC score below which candidates skip the cluster gate")
+    p.add_argument("--descriptor", choices=["sc", "spinnet"], default="sc",
+                   help="new-policy matching signal: Scan Context, or cached "
+                        "miniSpinNet-32D mean descriptors (Direction B "
+                        "follow-up; needs <preset>_descs.npz from "
+                        "eval_rap_retrieval.py). Old policy stays SC-only.")
+    p.add_argument("--desc-cache-dir",
+                   default=os.path.join(REPO, "output_rap_retrieval"))
+    p.add_argument("--spinnet-thresh", type=float, default=0.005,
+                   help="spinnet cosine-distance acceptance threshold "
+                        "(Direction B best-F1 on KITTI-02: ~0.003)")
+    p.add_argument("--spinnet-strong", type=float, default=0.002,
+                   help="spinnet score below which candidates skip the "
+                        "cluster gate")
     p.add_argument("--min-cluster", type=int, default=2)
     p.add_argument("--max-per-cluster", type=int, default=2)
     p.add_argument("--cluster-w", type=int, default=50)
@@ -98,6 +111,9 @@ def parse_args():
     p.add_argument("--kf-rot", type=float, default=12.0)
     # GT + simulation
     p.add_argument("--gt-loop-dist", type=float, default=3.0)
+    p.add_argument("--topk", default="1,3,5,10,20",
+                   help="comma-separated K values for the streaming top-K "
+                        "recall table (per descriptor)")
     p.add_argument("--hz", type=float, default=12.0, help="scan arrival rate")
     p.add_argument("--t-verify", type=float, default=3.0, help="seconds per RAP verification")
     p.add_argument("--sweep", action="store_true",
@@ -252,9 +268,13 @@ class OldPolicy:
 
 
 class NewPolicy:
-    """2026-07-31 rework: full-scan vectorized SC (no ring-key prefilter),
-    cluster-persistence gate (ClusterGate), best-first priority queue,
-    no permanent verification budget."""
+    """2026-07-31 rework: full-scan vectorized matching (no ring-key
+    prefilter), cluster-persistence gate (ClusterGate), best-first priority
+    queue, no permanent verification budget.
+
+    The matching signal is selectable via args.descriptor: "sc" (Scan
+    Context, shift-invariant distance) or "spinnet" (cached miniSpinNet-32D
+    mean descriptors, cosine distance — Direction B follow-up)."""
 
     def __init__(self, args):
         self.args = args
@@ -264,23 +284,33 @@ class NewPolicy:
         self._counter = 0
         self._db_indices: List[int] = []
         self._db_scs: List[np.ndarray] = []
+        self._db_spins: List[np.ndarray] = []
         self.proposal_log: List[dict] = []  # every QUEUED pair w/ score
+        strong = (args.spinnet_strong if args.descriptor == "spinnet"
+                  else args.sc_strong)
         self.gate = ClusterGate(window=args.cluster_w,
                                 min_cluster=args.min_cluster,
                                 max_per_cluster=args.max_per_cluster,
                                 spacing=args.cluster_spacing,
-                                strong_thresh=args.sc_strong)
+                                strong_thresh=strong)
 
     def propose(self, j: int, t: float, keyframes, poses, desc):
         a = self.args
         earlier = [i for i in self._db_indices if j - i >= a.loop_sep]
-        cand = []  # (tier, score, i): tier 0 = SC, tier 1 = proximity
+        cand = []  # (tier, score, i): tier 0 = descriptor, tier 1 = proximity
         if earlier:
             k = [self._db_indices.index(i) for i in earlier]
-            db = np.stack([self._db_scs[kk] for kk in k])
-            dists, _ = sc_mod.sc_distances_batch(db, desc[j]["sc"])
+            if a.descriptor == "spinnet":
+                # NaN rows (missing cache entries) never pass the threshold.
+                db = np.stack([self._db_spins[kk] for kk in k])
+                dists = 1.0 - db @ desc[j]["spin"]
+                weak = a.spinnet_thresh
+            else:
+                db = np.stack([self._db_scs[kk] for kk in k])
+                dists, _ = sc_mod.sc_distances_batch(db, desc[j]["sc"])
+                weak = a.sc_thresh
             for i, d in zip(earlier, dists):
-                if d < a.sc_thresh:
+                if d < weak:
                     cand.append((0, float(d), i))
         for i in earlier:
             d = float(np.linalg.norm(poses[j][:3, 3] - poses[i][:3, 3]))
@@ -306,9 +336,15 @@ class NewPolicy:
                 heapq.heappush(self.pending,
                                ((qtier, qscore, self._counter), (t, qkey)))
                 self._counter += 1
-        # Register j in the SC database AFTER proposing (matches live order).
+        # Register j in the descriptor database AFTER proposing (live order).
         self._db_indices.append(j)
         self._db_scs.append(desc[j]["sc"])
+        self._db_spins.append(desc[j].get("spin", self._nan_spin()))
+
+    def _nan_spin(self):
+        if not hasattr(self, "_nan_spin_vec"):
+            self._nan_spin_vec = np.full(32, np.nan)
+        return self._nan_spin_vec
 
     def peek_next(self):
         return self.pending[0][1] if self.pending else None
@@ -408,6 +444,32 @@ def main():
         desc[k] = {"sc": sc, "ring_key": sc_mod.make_ring_key(sc)}
     logger.info(f"Descriptors built in {time.time() - t0:.1f} s")
 
+    # Direction B follow-up: cached miniSpinNet-32D mean descriptors
+    # (eval_rap_retrieval.py). Rows are keyed by the npz's own keyframe list,
+    # which may differ slightly from the streaming keyframes (POSS: 82 vs 81)
+    # — align by frame index; missing entries get NaN vectors (never match).
+    spin_cache = os.path.join(args.desc_cache_dir, f"{args.preset}_descs.npz")
+    n_spin = 0
+    if os.path.exists(spin_cache):
+        z = np.load(spin_cache)
+        vecs = z["spinnet_mean"].astype(np.float64)
+        vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
+        spin_map = {int(k): v for k, v in zip(z["keyframes"].tolist(), vecs)}
+        nan_vec = np.full(32, np.nan)
+        for k in keyframes:
+            v = spin_map.get(k)
+            if v is not None:
+                desc[k]["spin"] = v
+                n_spin += 1
+            else:
+                desc[k]["spin"] = nan_vec
+        logger.info(f"spinnet descriptors: {n_spin}/{len(keyframes)} "
+                    f"keyframes covered from {spin_cache}")
+    elif args.descriptor == "spinnet":
+        raise FileNotFoundError(f"no spinnet cache at {spin_cache} — run "
+                                f"eval_rap_retrieval.py first")
+    have_spin = n_spin > 0
+
     # Sanity: batch matcher must exactly reproduce the scalar matcher.
     rng = np.random.default_rng(0)
     for _ in range(20):
@@ -422,9 +484,16 @@ def main():
           f"(dist < {args.gt_loop_dist} m, sep >= {args.loop_sep}) ===")
     print(f"true pairs: {sorted(truth)}")
 
-    # ---------------- diagnostics: SC separability of the true pairs ------
-    print("\n=== True-pair SC diagnostics (full-scan distances at arrival of j) ===")
-    print(f"{'pair':>12} {'gt_d':>5} {'sc_d':>6} {'rk_rank':>8} {'sc_rank':>8}")
+    # ---------------- diagnostics: separability of the true pairs ----------
+    hdr = f"{'pair':>12} {'gt_d':>5} {'sc_d':>6} {'rk_rank':>8} {'sc_rank':>8}"
+    if have_spin:
+        hdr += f" {'spin_d':>7} {'spin_rank':>9}"
+    print("\n=== True-pair diagnostics (full-scan distances at arrival of j) ===")
+    print(hdr)
+    ks = [int(x) for x in args.topk.split(",")]
+    hit_sc = {K: 0 for K in ks}
+    hit_spin = {K: 0 for K in ks}
+    n_ranked = 0
     for (i, j) in sorted(truth, key=lambda p: p[1]):
         earlier = [k for k in keyframes if k < j and j - k >= args.loop_sep]
         db = np.stack([desc[k]["sc"] for k in earlier])
@@ -438,11 +507,38 @@ def main():
         rk_rank = rk_sorted.index(
             float(np.linalg.norm(rk_j - desc[i]["ring_key"]))) + 1
         gt_d = float(np.linalg.norm(gt_poses[i][:3, 3] - gt_poses[j][:3, 3]))
-        print(f"{str((i, j)):>12} {gt_d:>5.2f} {sc_d:>6.3f} {rk_rank:>8d} {sc_rank:>8d}")
+        row = f"{str((i, j)):>12} {gt_d:>5.2f} {sc_d:>6.3f} {rk_rank:>8d} {sc_rank:>8d}"
+        n_ranked += 1
+        for K in ks:
+            if sc_rank <= K:
+                hit_sc[K] += 1
+        if have_spin:
+            sp_db = np.stack([desc[k]["spin"] for k in earlier])
+            sp_dists = 1.0 - sp_db @ desc[j]["spin"]
+            sp_d = float(sp_dists[k_pos])
+            # NaN distances (missing cache rows) count as "worse than us".
+            sp_rank = int(np.nansum(sp_dists < sp_d)) + 1
+            row += f" {sp_d:7.4f} {sp_rank:9d}"
+            for K in ks:
+                if sp_rank <= K:
+                    hit_spin[K] += 1
+        print(row)
+    if n_ranked:
+        print(f"\nstreaming recall@K (true pairs ranked <= K at arrival of j, "
+              f"n={n_ranked}):")
+        rec_sc = " ".join(f"@{K}={hit_sc[K] / n_ranked:.2f}" for K in ks)
+        print(f"  sc:      {rec_sc}")
+        if have_spin:
+            rec_sp = " ".join(f"@{K}={hit_spin[K] / n_ranked:.2f}" for K in ks)
+            print(f"  spinnet: {rec_sp}")
 
-    # ---------------- run both policies ------------------------------------
+    # ---------------- run policies ------------------------------------------
+    # Old policy is the pre-2026-07-31 SC ring-key reference; with
+    # descriptor=spinnet only the new policy is meaningful.
+    arms = (("old", OldPolicy), ("new", NewPolicy)) if args.descriptor == "sc" \
+        else (("new", NewPolicy),)
     seq_time = n / args.hz
-    for name, cls in (("old", OldPolicy), ("new", NewPolicy)):
+    for name, cls in arms:
         policy = cls(args)
         t0 = time.time()
         verified_at, stats = simulate(policy, keyframes, odom_poses, desc,
@@ -487,18 +583,25 @@ def main():
 
     # ---------------- threshold sweep for the new policy -------------------
     if args.sweep:
-        print("\n=== new-policy sc_thresh sweep ===")
+        spin = args.descriptor == "spinnet"
+        thr_list = ((0.002, 0.003, 0.004, 0.005, 0.007, 0.010) if spin
+                    else (0.15, 0.18, 0.20, 0.22, 0.25, 0.30))
+        label = "spinnet_thresh" if spin else "sc_thresh"
+        print(f"\n=== new-policy {label} sweep ===")
         print(f"{'thresh':>7} {'prop':>5} {'ver':>5} {'tp_v':>5} {'rec':>5} "
               f"{'false_v':>8} {'gpu_min':>8}")
-        for thr in (0.15, 0.18, 0.20, 0.22, 0.25, 0.30):
-            args.sc_thresh = thr
+        for thr in thr_list:
+            if spin:
+                args.spinnet_thresh = thr
+            else:
+                args.sc_thresh = thr
             policy = NewPolicy(args)
             verified_at, stats = simulate(policy, keyframes, odom_poses, desc,
                                           args.hz, args.t_verify)
             verified = set(verified_at)
             tp_v, _, rec_v = prf(verified, truth)
             false_v = len(verified - truth)
-            print(f"{thr:>7.2f} {stats['n_proposed']:>5} {stats['n_verified']:>5} "
+            print(f"{thr:>7.4f} {stats['n_proposed']:>5} {stats['n_verified']:>5} "
                   f"{tp_v:>5} {rec_v:>5.2f} {false_v:>8} "
                   f"{len(verified) * args.t_verify / 60:>8.1f}")
     return 0
