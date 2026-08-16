@@ -7,6 +7,8 @@
 #   3. live odometry APE ~ offline 8.26 m, live PGO APE ~ offline 1.82 m
 #
 #   bash /mnt/e/githouse/RAP-SLAM/ros2/verify_step3_headless.sh [n_frames] [rate]
+#   Env knobs: SAVE_SUFFIX=_deskew (separate output_ros2/step3_deskew/ + logs,
+#   golden step3/ untouched), ODOM_ARGS="-p deskew:=true", DRAIN_SECS=240.
 #
 # Products land in output_ros2/step3/ (logs alongside in output_ros2/).
 
@@ -19,7 +21,10 @@ RATE="${2:-10}"
 # `-p rate:=15` is rejected as INTEGER. Always pass a decimal form.
 case "$RATE" in *.*) ;; *) RATE="$RATE.0" ;; esac
 OUT_DIR="$REPO_ROOT/output_ros2"
-SAVE_DIR="$OUT_DIR/step3"
+# Optional SAVE_SUFFIX distinguishes re-runs (e.g. SAVE_SUFFIX=_deskew ->
+# output_ros2/step3_deskew/, logs *_deskew.log) without deleting the golden.
+SUFFIX="${SAVE_SUFFIX:-}"
+SAVE_DIR="$OUT_DIR/step3$SUFFIX"
 LOG_DIR="$OUT_DIR"
 CONDA_PY=/root/miniconda3/envs/rap-inference/bin/python
 mkdir -p "$SAVE_DIR"
@@ -32,48 +37,51 @@ END=$((3850 + N - 1))
 
 rm -f "$SAVE_DIR/accepted_loops.json" "$SAVE_DIR/keyframes.json" \
       "$SAVE_DIR/map_poses.txt" "$SAVE_DIR/merged_map_live.ply" \
-      "$LOG_DIR/live_poses_step3.txt" \
-      "$LOG_DIR/rap_server.log" "$LOG_DIR/odom_node.log" \
-      "$LOG_DIR/loop_node.log" "$LOG_DIR/player.log"
+      "$LOG_DIR/live_poses_step3$SUFFIX.txt" \
+      "$LOG_DIR/rap_server$SUFFIX.log" "$LOG_DIR/odom_node$SUFFIX.log" \
+      "$LOG_DIR/loop_node$SUFFIX.log" "$LOG_DIR/player$SUFFIX.log"
 
 PIDS=()
 trap 'kill "${PIDS[@]}" 2>/dev/null || true' EXIT
 
 # 1. GPU worker (model load ~30 s).
-"$CONDA_PY" "$SCRIPT_DIR/rap_server.py" > "$LOG_DIR/rap_server.log" 2>&1 &
+"$CONDA_PY" "$SCRIPT_DIR/rap_server.py" > "$LOG_DIR/rap_server$SUFFIX.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 120); do
-  grep -q "RAP server listening" "$LOG_DIR/rap_server.log" 2>/dev/null && break
+  grep -q "RAP server listening" "$LOG_DIR/rap_server$SUFFIX.log" 2>/dev/null && break
   sleep 0.5
 done
-grep -q "RAP server listening" "$LOG_DIR/rap_server.log" || {
-  echo "FAIL: rap_server did not start; see $LOG_DIR/rap_server.log"; exit 1; }
+grep -q "RAP server listening" "$LOG_DIR/rap_server$SUFFIX.log" || {
+  echo "FAIL: rap_server did not start; see $LOG_DIR/rap_server$SUFFIX.log"; exit 1; }
 
 # 2. Odometry node. queue_depth=20: verification requires EVERY scan for
 # GT-comparable eval; depth 1 drops frames whenever a register spike exceeds
 # the frame period (observed up to 260 ms under the full Step-3 stack).
+# Extra node args can be injected via ODOM_ARGS (later -p wins),
+# e.g. ODOM_ARGS="-p deskew:=true".
+# shellcheck disable=SC2086
 python3 "$SCRIPT_DIR/odometry_node.py" \
-  --ros-args -p save_poses:="$LOG_DIR/live_poses_step3.txt" -p queue_depth:=20 \
-  > "$LOG_DIR/odom_node.log" 2>&1 &
+  --ros-args -p save_poses:="$LOG_DIR/live_poses_step3$SUFFIX.txt" -p queue_depth:=20 ${ODOM_ARGS:-} \
+  > "$LOG_DIR/odom_node$SUFFIX.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 60); do
-  grep -q "KISS-ICP odometry up" "$LOG_DIR/odom_node.log" 2>/dev/null && break
+  grep -q "KISS-ICP odometry up" "$LOG_DIR/odom_node$SUFFIX.log" 2>/dev/null && break
   sleep 0.5
 done
 
 # 3. Loop-closure node.
 python3 "$SCRIPT_DIR/loop_closure_node.py" \
   --ros-args -p save_dir:="$SAVE_DIR" \
-  > "$LOG_DIR/loop_node.log" 2>&1 &
+  > "$LOG_DIR/loop_node$SUFFIX.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 60); do
-  grep -q "Loop-closure node up" "$LOG_DIR/loop_node.log" 2>/dev/null && break
+  grep -q "Loop-closure node up" "$LOG_DIR/loop_node$SUFFIX.log" 2>/dev/null && break
   sleep 0.5
 done
 
 # 4. Player.
 python3 "$SCRIPT_DIR/pointcloud_player.py" --ros-args -p end:=$END -p rate:=$RATE \
-  > "$LOG_DIR/player.log" 2>&1 &
+  > "$LOG_DIR/player$SUFFIX.log" 2>&1 &
 PIDS+=($!)
 
 # Wait for playback to finish (RATE Hz + margin), then for the verification
@@ -81,9 +89,9 @@ PIDS+=($!)
 # "Loop worker idle" lines so an idle message logged DURING playback does
 # not end the wait early; DRAIN_SECS (default 240) bounds the wait.
 sleep $((N / ${RATE%.*} + 15))
-IDLE0=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node.log" 2>/dev/null || echo 0)
+IDLE0=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node$SUFFIX.log" 2>/dev/null || echo 0)
 for _ in $(seq 1 "${DRAIN_SECS:-240}"); do
-  IDLE1=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node.log" 2>/dev/null || echo 0)
+  IDLE1=$(grep -c "Loop worker idle" "$LOG_DIR/loop_node$SUFFIX.log" 2>/dev/null || echo 0)
   [ "$IDLE1" -gt "$IDLE0" ] && break
   sleep 1
 done
@@ -94,11 +102,11 @@ sleep 3
 kill "${PIDS[@]}" 2>/dev/null || true
 sleep 1
 
-grep -q "map published" "$LOG_DIR/loop_node.log" || {
+grep -q "map published" "$LOG_DIR/loop_node$SUFFIX.log" || {
   echo "FAIL: /map_cloud was never published"; exit 1; }
 
 # Evaluate with the conda python (evo + the offline GT loader).
-"$CONDA_PY" - "$SAVE_DIR" "$LOG_DIR/live_poses_step3.txt" "$REPO_ROOT" "$N" <<'EOF'
+"$CONDA_PY" - "$SAVE_DIR" "$LOG_DIR/live_poses_step3$SUFFIX.txt" "$REPO_ROOT" "$N" <<'EOF'
 import json
 import os
 import sys
