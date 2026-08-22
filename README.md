@@ -149,7 +149,7 @@ RAP-SLAM/
 - 真实验证已覆盖 POSS + KITTI 00/02/05/06（2026-08-08：验收门与 SC 检索跨数据集泛化，累计零假接受）；MCD/Livox 仍未做。
 - ~~密集同址冗余回环边使 PGO 略差于纯里程计（KITTI-06 live 2.777→3.221 m）~~ → 已修复（2026-08-08）：PGO 前贪心 (i,j) 空间 NMS（`nms_loop_edges`，保留 Chebyshev-w 单元内最高 overlap 边；**live 默认 w=10 开、离线默认关**——live 检索不设上限故密集簇是常态，离线有候选预算）。证据 `scripts/eval_loop_edge_nms.py`：KITTI-06 3.221→2.573 m、KITTI-02 182→38 边 26.423→26.018 m、POSS 不变；live 复测 KITTI-06 PGO **2.581 m < 里程计 2.777 m**（NMS 114→25 边），POSS 离线金标准 1.821 m 逐位不变。
 
-## 论文对比表（P0+P1，2026-08-22）
+## 论文对比表（P0 收尾，2026-08-22）
 
 - `scripts/eval_paper_metrics.py`（P0）：对全部已存轨迹产物统一计算论文口径指标——evo aligned ATE RMSE（SE(3) Umeyama）+ KITTI 官方 100–800 m 分段相对漂移 ter/rer。产物 `output_paper_metrics/paper_metrics.{json,md}`（被 gitignore，可重生成）。
 - `scripts/rerun_pgo_saved.py`：从已存 live 产物（TUM 里程计 + keyframes + accepted_loops）用**当前后端**重跑 PGO。KITTI-02 现行后端权威数字：unaligned APE **26.018 m** / aligned **4.035 m**（旧后端 27.387 m，精确命中 `eval_loop_edge_nms` 预测）；POSS / KITTI-06 逐位复现已存数字（回归通过）。
