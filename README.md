@@ -157,6 +157,15 @@ RAP-SLAM/
 - `scripts/make_comparison_table.py` → `output_paper_metrics/comparison_table.{md,json}`（CPU-only 可随时重跑）：三张表——ter 逐序列（含 00–06 均值列）、rer 逐序列、aligned ATE（含回环数注记）。
 - **结论要点**：ter 是局部指标，回环价值体现在 aligned ATE——00: 3.94→**2.26 m**（40/40 真回环）、02: 7.95→**4.03 m**（182 边）、05: 1.87→**1.13 m**、06: 0.89→**0.87 m**、POSS-A 2.56→**0.67 m**、POSS-B 1.92→**1.04 m**。我们 00–06 ter 均值 1.13% 弱于文献均值（前端是 POSS 调参的 KISS-ICP，非论文配置 0.50%；01 高速公路拉高均值）——论文叙事应主打回环验证精度与全局一致性。
 
+### P1 模块级 verifier-swap（2026-08-22，`scripts/eval_verifier_swap.py`，CPU-only）
+
+同一前端（KISS-ICP）、同一检索（**live 系统实际提出的候选集**，从节点日志/已存产物解析）、同一后端（relfloor+Huber+NMS w=10），只换验证器四臂：`noverif`（识别即闭环，恒等 T_rel 全接受）/ `icp_odom`（双尺度 point-to-point ICP 5.0→1.0 m，里程计初始化）/ `icp_scyaw`（SC 偏航提示初始化）/ `rap`（已存结果）。产物 `output_verifier_swap/`（swap_table.{md,json} + 逐候选诊断 JSON + 分臂 TUM）。
+
+- **KITTI-02**（256 候选 = 32≤3m + 93×3–10m + 70×10–30m + 61>30m 真假）：noverif 全接受 → **地图报废 265 m**；icp_odom 与 rap 都**零/近乎零真假日接受**（>30 m：0 vs 1）——双指标门跨引擎可迁移；**RAP 边精度 ~2× 于 ICP**（中位 2.03 vs 3.58 m），aligned ATE 4.035 vs 5.005 m、ter 1.237 vs 1.342 全胜；RAP 多救回 11 条同街约束（ICP 从里程计初始化对不齐的 11–37 m 对，ICP 接受集 ⊂ RAP 接受集）；ICP unaligned 24.423 略低于 RAP 26.018——因为它更保守、少收了 11 条含噪同街边，属"少收边"而非"收得准"。
+- **KITTI-06**（114 全真候选，短误差易回环）：ICP 精修略细（0.07 vs 0.08 m，APE 2.513 vs 2.581）——短初始误差下 ICP 在收敛域内；**SC 偏航提示重算后反而害 ICP 丢 4 条真回环**（SC 位移在重复结构上混叠出 318–342° 假提示），与 RC-2 结论互证。
+- **POSS**（2 全真候选）：rap 1.757 m 仍最优，icp 1.774 紧咬（13 m 初始误差下 dR 小，ICP 两级收敛成功）；noverif 2.270 m——Huber+relfloor 兜住了恒等边的部分伤害。
+- 回归校验：三数据集 rap 臂逐位复现 `rerun_pgo_saved.py` 基准（26.018 / 2.581 / 1.757）。
+
 ## 路线图（RAP-CORE，2026-08-01 重构）
 
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。
