@@ -149,6 +149,14 @@ RAP-SLAM/
 - 真实验证已覆盖 POSS + KITTI 00/02/05/06（2026-08-08：验收门与 SC 检索跨数据集泛化，累计零假接受）；MCD/Livox 仍未做。
 - ~~密集同址冗余回环边使 PGO 略差于纯里程计（KITTI-06 live 2.777→3.221 m）~~ → 已修复（2026-08-08）：PGO 前贪心 (i,j) 空间 NMS（`nms_loop_edges`，保留 Chebyshev-w 单元内最高 overlap 边；**live 默认 w=10 开、离线默认关**——live 检索不设上限故密集簇是常态，离线有候选预算）。证据 `scripts/eval_loop_edge_nms.py`：KITTI-06 3.221→2.573 m、KITTI-02 182→38 边 26.423→26.018 m、POSS 不变；live 复测 KITTI-06 PGO **2.581 m < 里程计 2.777 m**（NMS 114→25 边），POSS 离线金标准 1.821 m 逐位不变。
 
+## 论文对比表（P0+P1，2026-08-22）
+
+- `scripts/eval_paper_metrics.py`（P0）：对全部已存轨迹产物统一计算论文口径指标——evo aligned ATE RMSE（SE(3) Umeyama）+ KITTI 官方 100–800 m 分段相对漂移 ter/rer。产物 `output_paper_metrics/paper_metrics.{json,md}`（被 gitignore，可重生成）。
+- `scripts/rerun_pgo_saved.py`：从已存 live 产物（TUM 里程计 + keyframes + accepted_loops）用**当前后端**重跑 PGO。KITTI-02 现行后端权威数字：unaligned APE **26.018 m** / aligned **4.035 m**（旧后端 27.387 m，精确命中 `eval_loop_edge_nms` 预测）；POSS / KITTI-06 逐位复现已存数字（回归通过）。
+- `data/literature/kitti_baselines.json`（**已入版本库**，gitignore 例外 `/data/*` + `!/data/literature/`）：15 个文献方法的 KITTI 逐序列 ter/rer，全部转录自论文表格并记录来源与约定（MULLS arXiv:2102.03771 Table II、CT-ICP arXiv:2109.12979 Table I、PSF-LO arXiv:2010.13355 Table II、KISS-ICP arXiv:2209.15397 Table II）。约定坑：MULLS/CT-ICP 施加 0.2°/0.205° 内参角校正而我们没有；CT-ICP 的 AVG 是全段平均；KISS-ICP 论文只报 split 均值（0.50%）。
+- `scripts/make_comparison_table.py` → `output_paper_metrics/comparison_table.{md,json}`（CPU-only 可随时重跑）：三张表——ter 逐序列（含 00–06 均值列）、rer 逐序列、aligned ATE（含回环数注记）。
+- **结论要点**：ter 是局部指标，回环价值体现在 aligned ATE——00: 3.94→**2.26 m**（40/40 真回环）、02: 7.95→**4.03 m**（182 边）、05: 1.87→**1.13 m**、06: 0.89→**0.87 m**、POSS-A 2.56→**0.67 m**、POSS-B 1.92→**1.04 m**。我们 00–06 ter 均值 1.13% 弱于文献均值（前端是 POSS 调参的 KISS-ICP，非论文配置 0.50%；01 高速公路拉高均值）——论文叙事应主打回环验证精度与全局一致性。
+
 ## 路线图（RAP-CORE，2026-08-01 重构）
 
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。
