@@ -1,0 +1,125 @@
+{
+  "_readme": "Literature baselines for the RAP-SLAM paper comparison table. All numbers transcribed from the cited papers' tables (source + table id + access date recorded). ter = KITTI official average relative translational drift [%] over 100-800 m subsegments; rer = rotational drift [deg/100 m]. Sequences 00-10 (train split). Convention notes: (a) MULLS paper applies the 0.2 deg intrinsic angle correction (following IMLS-SLAM); CT-ICP applies 0.205 deg; our pipeline does NOT. (b) CT-ICP Table I AVG is averaged over all segments of all sequences, not per-seq mean. (c) KISS-ICP paper reports only split averages. (d) SuMa per-seq ter transcribed from PSF-LO paper Table II (which copies the SuMa paper / KITTI-train convention; KISS-ICP paper reports SuMa 00-10 avg 0.80, consistent within rounding).",
+  "_accessed": "2026-08-22",
+  "seqs": ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"],
+  "methods": {
+    "LOAM": {
+      "full": "LOAM (Zhang & Singh, RSS 2014 / Auton. Robots 2017)",
+      "type": "odometry+mapping",
+      "source": "MULLS paper (arXiv:2102.03771v2) Table II, orig. LOAM paper + KITTI leaderboard",
+      "ter": [0.78, 1.43, 0.92, 0.86, 0.71, 0.57, 0.65, 0.63, 1.12, 0.77, 0.79],
+      "mean_00_10_ter": 0.84
+    },
+    "IMLS-SLAM": {
+      "full": "IMLS-SLAM (Deschaud, ICRA 2018)",
+      "type": "odometry",
+      "source": "MULLS paper Table II (per-seq); CT-ICP paper Table I reports the same per-seq values with mean 0.55",
+      "ter": [0.50, 0.82, 0.53, 0.68, 0.33, 0.32, 0.33, 0.33, 0.80, 0.55, 0.53],
+      "mean_00_10_ter": 0.52
+    },
+    "MC2SLAM": {
+      "full": "MC2SLAM (Neuhaus et al., GCPR 2018)",
+      "type": "odometry",
+      "source": "MULLS paper Table II",
+      "ter": [0.51, 0.79, 0.54, 0.65, 0.44, 0.27, 0.31, 0.34, 0.84, 0.46, 0.52],
+      "mean_00_10_ter": 0.52
+    },
+    "S4-SLAM": {
+      "full": "S4-SLAM (Zhou et al., Auton. Robots 2020), with loop closure",
+      "type": "slam",
+      "source": "MULLS paper Table II",
+      "ter": [0.62, 1.11, 1.63, 0.82, 0.95, 0.50, 0.65, 0.60, 1.33, 1.05, 0.96],
+      "mean_00_10_ter": 0.92
+    },
+    "PSF-LO": {
+      "full": "PSF-LO (Chen et al., arXiv 2020), semantic",
+      "type": "odometry",
+      "source": "MULLS paper Table II",
+      "ter": [0.64, 1.32, 0.87, 0.75, 0.66, 0.45, 0.47, 0.46, 0.94, 0.56, 0.54],
+      "mean_00_10_ter": 0.74
+    },
+    "SuMa": {
+      "full": "SuMa (Behley & Stachniss, RSS 2018), with loop closure",
+      "type": "slam",
+      "source": "PSF-LO paper (arXiv:2010.13355v1) Table II; KISS-ICP paper Table II reports SuMa 00-10 avg 0.80",
+      "ter": [0.68, 1.70, 1.20, 0.74, 0.44, 0.43, 0.54, 0.74, 1.20, 0.62, 0.72],
+      "mean_00_10_ter": 0.83
+    },
+    "SuMa++": {
+      "full": "SuMa++ (Chen et al., IROS 2019), semantic, with loop closure",
+      "type": "slam",
+      "source": "MULLS paper Table II",
+      "ter": [0.64, 1.60, 1.00, 0.67, 0.37, 0.40, 0.46, 0.34, 1.10, 0.47, 0.66],
+      "rer": [0.22, 0.46, 0.37, 0.46, 0.26, 0.20, 0.21, 0.19, 0.35, 0.23, 0.28],
+      "mean_00_10_ter": 0.70, "mean_00_10_rer": 0.29
+    },
+    "LiTAMIN2": {
+      "full": "LiTAMIN2 (Yokozuka et al., ICRA 2021), with loop closure",
+      "type": "slam",
+      "source": "MULLS paper Table II",
+      "ter": [0.70, 2.10, 0.98, 0.96, 1.05, 0.45, 0.59, 0.44, 0.95, 0.69, 0.80],
+      "rer": [0.28, 0.46, 0.32, 0.48, 0.52, 0.25, 0.34, 0.32, 0.29, 0.40, 0.47],
+      "mean_00_10_ter": 0.85, "mean_00_10_rer": 0.33
+    },
+    "LO-Net": {
+      "full": "LO-Net (Li et al., CVPR 2019), learning-based odometry",
+      "type": "odometry",
+      "source": "MULLS paper Table II",
+      "ter": [0.78, 1.42, 1.01, 0.73, 0.56, 0.62, 0.55, 0.56, 1.08, 0.77, 0.92],
+      "rer": [0.42, 0.40, 0.45, 0.59, 0.54, 0.35, 0.35, 0.45, 0.43, 0.38, 0.41],
+      "mean_00_10_ter": 0.83, "mean_00_10_rer": 0.42
+    },
+    "MULLS-LO": {
+      "full": "MULLS-LO (Pan et al., ICRA 2021), odometry only",
+      "type": "odometry",
+      "source": "MULLS paper Table II",
+      "ter": [0.51, 0.62, 0.55, 0.61, 0.35, 0.28, 0.24, 0.29, 0.80, 0.49, 0.61],
+      "rer": [0.18, 0.09, 0.17, 0.22, 0.08, 0.17, 0.11, 0.18, 0.25, 0.15, 0.19],
+      "mean_00_10_ter": 0.49, "mean_00_10_rer": 0.16
+    },
+    "MULLS-SLAM": {
+      "full": "MULLS-SLAM (Pan et al., ICRA 2021), with TEASER loop closure + PGO",
+      "type": "slam",
+      "source": "MULLS paper Table II",
+      "ter": [0.54, 0.62, 0.69, 0.61, 0.35, 0.29, 0.29, 0.27, 0.83, 0.51, 0.61],
+      "rer": [0.13, 0.09, 0.13, 0.22, 0.08, 0.07, 0.08, 0.11, 0.17, 0.12, 0.19],
+      "mean_00_10_ter": 0.52, "mean_00_10_rer": 0.13
+    },
+    "CT-ICP": {
+      "full": "CT-ICP (Dellenbach et al., ICRA 2022), odometry (KITTI-corrected scans)",
+      "type": "odometry",
+      "source": "CT-ICP paper (arXiv:2109.12979v2) Table I, KITTI-corrected; AVG averaged over all segments of all seqs",
+      "ter": [0.49, 0.76, 0.52, 0.72, 0.39, 0.25, 0.27, 0.31, 0.81, 0.49, 0.48],
+      "mean_00_10_ter": 0.53
+    },
+    "pyLiDAR-F2M": {
+      "full": "pyLiDAR-SLAM F2M (Dellenbach et al., IROS 2021)",
+      "type": "odometry",
+      "source": "CT-ICP paper Table I, KITTI-corrected",
+      "ter": [0.51, 0.79, 0.51, 0.64, 0.36, 0.29, 0.29, 0.32, 0.78, 0.46, 0.57],
+      "mean_00_10_ter": 0.53
+    },
+    "KISS-ICP": {
+      "full": "KISS-ICP (Vizzo et al., RA-L 2022) - our front-end; paper reports split averages only",
+      "type": "odometry",
+      "source": "KISS-ICP paper (arXiv:2209.15397v2) Table II",
+      "mean_00_10_ter": 0.50,
+      "note": "No per-seq numbers in the paper. Our own KISS-ICP runs (rap-slam 'odometry' rows) use a POSS-tuned single config (max_range 80 m, min_range 1.5 m, voxel 0.8 m), NOT the paper config - so our odometry baseline is weaker than the published 0.50."
+    },
+    "F-LOAM": {
+      "full": "F-LOAM (Wang et al., IROS 2020)",
+      "type": "odometry",
+      "source": "KISS-ICP paper Table II (split averages only)",
+      "mean_00_10_ter": 0.84
+    }
+  },
+  "ate_baselines": {
+    "CT-ICP+LC": {
+      "full": "CT-ICP + elevation-image loop closure + g2o PGO",
+      "source": "CT-ICP paper (arXiv:2109.12979v2) Table II",
+      "note": "ATE = MEAN absolute trajectory error [m] after best rigid fit to GT, KITTI-raw seq 00 (4541 scans): odometry 6.22 -> with LC 0.66. Convention differs from ours (we report RMSE after SE(3) Umeyama, evo --align).",
+      "kitti00_odom_mean_ate": 6.22,
+      "kitti00_lc_mean_ate": 0.66
+    }
+  }
+}

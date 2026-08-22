@@ -1,5 +1,6 @@
 # Dataset (download separately, see README and scripts/download_poss_segment.py)
-/data
+/data/*
+!/data/literature/
 
 # Experiment outputs (regenerable via scripts/run_pipeline.py and eval scripts)
 /output*

@@ -211,6 +211,16 @@ OFFLINE_DIRS = [
 LIVE_RUNS = [  # (name, live_poses, map_poses, source, seq/segment)
     ("step3_poss", "output_ros2/live_poses_step3.txt",
      "output_ros2/step3/map_poses.txt", "poss", "A"),
+    # *_current: PGO re-run on the saved live inputs with the CURRENT
+    # rap_slam.pose_graph defaults (relfloor+Huber, loop-edge NMS w=10) via
+    # scripts/rerun_pgo_saved.py — the saved map_poses.txt freeze older
+    # backend code (e.g. step3_kitti02 predates RC-1 and NMS).
+    ("step3_poss_current", "output_ros2/live_poses_step3.txt",
+     "output_ros2/step3/map_poses_current.txt", "poss", "A"),
+    ("step3_kitti02_current", "output_ros2/live_poses_kitti02.txt",
+     "output_ros2/step3_kitti02/map_poses_current.txt", "kitti", "02"),
+    ("step3_kitti06_current", "output_ros2/live_poses_kitti06.txt",
+     "output_ros2/step3_kitti06/map_poses_current.txt", "kitti", "06"),
     ("step3_poss_deskew", "output_ros2/live_poses_step3_deskew.txt",
      "output_ros2/step3_deskew/map_poses.txt", "poss", "A"),
     ("step3_kitti01", "output_ros2/live_poses_kitti01.txt",
