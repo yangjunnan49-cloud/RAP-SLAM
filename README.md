@@ -166,6 +166,16 @@ RAP-SLAM/
 - **POSS**（2 全真候选）：rap 1.757 m 仍最优，icp 1.774 紧咬（13 m 初始误差下 dR 小，ICP 两级收敛成功）；noverif 2.270 m——Huber+relfloor 兜住了恒等边的部分伤害。
 - 回归校验：三数据集 rap 臂逐位复现 `rerun_pgo_saved.py` 基准（26.018 / 2.581 / 1.757）。
 
+### P2 标定生成式不确定性（2026-08-23，`scripts/eval_calibrated_weighting.py`，CPU-only）
+
+在 KITTI-02 全部 182 条已存边 + POSS 18 条边上拟合条件误差模型 p(边误差 | overlap, mean_dist, 多生成离散度)，并对 KITTI 00/05/06 做零调参迁移。产物 `output_calibrated/`（edge_dataset.json 378 边 + fit_report.{md,json}）。
+
+- **拟合结果**：σ_t = 2.835·mean_dist^0.032 m（**近似常数 2.8 m**）、σ_r = 1.174·mean_dist^0.305 deg。特征信号量（Pearson vs ln GT 误差）：**mean_dist r=0.022、overlap r=0.044（≈零）**，多生成离散度 disp_t r=0.377（唯一有信号，但需额外采样趟数且 RC-3 已证 PGO 无增益）。
+- **标定对比**（fit 集 1σ 平移覆盖率，目标 68%）：fixed/relfloor **2%（灾难性过自信）**、adaptive 28%、calibrated 86%、离散度模型 76%（同子集上 mean_dist 模型 85%）。
+- **零调参迁移**：平移覆盖率 00/05/06 全部 100%（安全但保守——误差水平由候选难度决定而非传感器，形状平坦可迁移、绝对水平不可直接迁移）。
+- **PGO 黄金回归**（calibrated vs relfloor，unaligned/aligned）：七黄金全部 ±5% 以内；aligned 在 00/02/06live/posslive 上更好（02: 3.78 vs 4.04 m），poss_live 1.674 vs 1.757 m。按预先声明的准则（全胜才换默认）**relfloor 保持默认**；`loop_weighting="calibrated"` + `calib_params` 已接入 `pose_graph.py`（默认不变）。
+- **论文价值**：量化了"PGO 实践里固定 σ=0.2 m 的过自信程度"（2% 覆盖率）；证明 RAP 过门后边误差与其几何诊断近似无关→近常数标定 σ 就是正确模型；离散度是唯一有信号的轴但工程上不划算。属"标定 + 性质"型贡献，不必主张 PGO 精度增益。
+
 ## 路线图（RAP-CORE，2026-08-01 重构）
 
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。

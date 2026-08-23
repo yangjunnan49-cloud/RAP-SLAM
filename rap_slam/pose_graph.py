@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def _loop_noise(lc, base_sigmas, weighting, alpha_t, alpha_r,
-                relfloor_ref, relfloor_cap):
+                relfloor_ref, relfloor_cap, calib_params=None):
     """Per-edge base (Gaussian) noise model for one loop constraint."""
     import gtsam
     from gtsam import noiseModel
@@ -48,6 +48,17 @@ def _loop_noise(lc, base_sigmas, weighting, alpha_t, alpha_r,
     if weighting == "adaptive":
         st = float(np.clip(alpha_t * md, 0.10, 3.0))
         sr = float(np.clip(alpha_r * md, 0.05, 1.0))
+        sigmas = np.array([sr, sr, sr, st, st, st])
+    elif weighting == "calibrated":
+        # P2: sigma from the fitted conditional error model
+        # sigma = a * mean_dist^b, clipped to [floor, cap]; calib_params
+        # carries the fit (scripts/eval_calibrated_weighting.py), rotation
+        # params in radians.
+        cp = calib_params or {}
+        st = float(np.clip(cp.get("a_t", 1.0) * md ** cp.get("b_t", 1.0),
+                           cp.get("floor_t", 0.10), cp.get("cap_t", 3.0)))
+        sr = float(np.clip(cp.get("a_r", 0.15) * md ** cp.get("b_r", 1.0),
+                           cp.get("floor_r", 0.001), cp.get("cap_r", 1.0)))
         sigmas = np.array([sr, sr, sr, st, st, st])
     elif weighting == "relfloor":
         s = float(np.clip(md / relfloor_ref, 1.0, relfloor_cap))
@@ -89,6 +100,7 @@ def optimize_pose_graph(
     relfloor_ref: float = 1.0,
     relfloor_cap: float = 3.0,
     loop_nms_width: float = 0.0,
+    calib_params=None,
 ) -> Dict[int, np.ndarray]:
     """Optimize a keyframe pose graph.
 
@@ -155,7 +167,7 @@ def optimize_pose_graph(
             continue
         noise = _loop_noise(lc, loop_sigmas, loop_weighting,
                             adaptive_alpha_t, adaptive_alpha_r,
-                            relfloor_ref, relfloor_cap)
+                            relfloor_ref, relfloor_cap, calib_params)
         if robust_kernel == "huber":
             noise = noiseModel.Robust.Create(
                 noiseModel.mEstimator.Huber(huber_k), noise)
