@@ -215,6 +215,12 @@ RC-4 只评了 KITTI-02+POSS；本矩阵补齐**全部 7 黄金 × 3 种子 × 3
 - **失败 taxonomy 修订**：≤16 部 × ≤4000 点的"安全区"在 KITTI-02 重复城市几何上**不成立**——3–16 部批次也会翘 1.3–7.3 m；POSS/05/00/06 的簇从不翘曲（0.01–0.5 m）。翘曲与否由**几何自相似性**决定而非批次大小；批次大小只决定翘曲的"频率"（82 帧一次性 = 全局 55 m 大弯）。
 - **总结论维持 RC-4**：pairwise 保持默认后端；N-way 的价值在方法节作为"循环一致约束生成器"讨论 + taxonomy/组合规则，不作精度主张。
 
+### P4 跨传感器 zero-shot 探测（2026-08-23，目标已定，冒烟未跑）
+
+- **可行性结论**：Newer College 被 Google 表单 + Google Drive 封锁（本机 000），不可行。按预定准则转向 **Oxford Spires Dataset**（IJRR 2025）：**Hesai QT64**（64 线、**104° 垂直视场**、60 m 量程、10 Hz 滚动快门）背负式平台，24 序列 / 6 牛津站点，TLS 配准 GT（1–2 cm，TUM 格式 `gt-tum.txt`），另附 vilens-slam/hba/colmap 基准轨迹（对比表免费素材）。下载路径：hf-mirror 镜像 → AWS CDN 签名地址，实测 **~3 MB/s、支持 Range**，2.2 GB 点云包 ≈ 13 分钟。
+- **已落地**：`rap_slam/spires_dataset.py`（二进制 PCD 解析 + TUM GT + 时间戳最近邻匹配）；`run_pipeline.py --source spires`；`scripts/select_spires_sequence.py`（GT 重访结构分析）；`scripts/download_spires.sh`（`gt` / `clouds <seq>`，校验+续传+重试）。GT 收割进行中（`E:\githouse\Datasets\oxford_spires\gt\`）；已见 keble-02（294 m/15 址）、keble-04（783 m/69 址）、christ-church-02（642 m/39 址）。
+- **下一步**：收 GT → 定序列（首选 keble-02，POSS-A 尺度）→ 下点云 → ** canonical 参数零调参冒烟** `--source spires --loop-sep 200` → 按 eval_paper_metrics 口径记录 aligned ATE/ter/回环统计，作为跨传感器表格行。
+
 ## 路线图（RAP-CORE，2026-08-01 重构）
 
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。
