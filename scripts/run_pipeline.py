@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rap_slam import (evaluate, keyframes as kf_mod, loop_closure, odometry,
                       pose_graph, real_dataset, scan_context as sc_mod,
-                      sequence)
+                      sequence, spires_dataset)
 
 logger = logging.getLogger("run_pipeline")
 
@@ -102,9 +102,10 @@ def parse_args():
     p.add_argument("--force-regenerate", action="store_true")
     p.add_argument("--skip-loop-closure", action="store_true")
     # --- real sequence (KITTI-format: KITTI odometry / POSS) ---
-    p.add_argument("--source", choices=["sim", "real"], default="sim",
+    p.add_argument("--source", choices=["sim", "real", "spires"], default="sim",
                    help="sim = simulated sequence from an aggregated map; "
-                        "real = KITTI-format dataset segment")
+                        "real = KITTI-format dataset segment; "
+                        "spires = Oxford Spires (Hesai QT64) sequence")
     p.add_argument("--real-root", default="/mnt/e/githouse/RAP-SLAM/data/poss",
                    help="dataset root with dataset/poses and dataset/sequences")
     p.add_argument("--real-seq", default="00")
@@ -114,6 +115,14 @@ def parse_args():
     p.add_argument("--real-apply-calib", action="store_true",
                    help="apply Tr velo<->cam conversion (KITTI convention; "
                         "POSS poses are already in the LiDAR/world frame)")
+    # --- Oxford Spires (P4 cross-sensor zero-shot) ---
+    p.add_argument("--spires-root",
+                   default="/mnt/e/githouse/Datasets/oxford_spires",
+                   help="root with sequences/<seq>/raw/lidar-clouds/*.pcd "
+                        "and gt/<seq>.txt")
+    p.add_argument("--spires-seq", default="2024-03-12-keble-college-02")
+    p.add_argument("--spires-start", type=int, default=0)
+    p.add_argument("--spires-end", type=int, default=None)
     p.add_argument("--odom-max-range", type=float, default=80.0)
     p.add_argument("--deskew", action="store_true",
                    help="synthesize per-point azimuth timestamps and enable "
@@ -124,6 +133,14 @@ def parse_args():
 
 def get_sequence(args):
     """Load cached sequence, generate a simulated one, or load a real segment."""
+    if getattr(args, "source", "sim") == "spires":
+        logger.info(f"Loading Oxford Spires {args.spires_seq} from "
+                    f"{args.spires_root} scans [{args.spires_start}:"
+                    f"{args.spires_end}]")
+        data = spires_dataset.load_spires_sequence(
+            args.spires_root, args.spires_seq, start=args.spires_start,
+            end=args.spires_end, min_range=1.5)
+        return data["gt_poses"], data["scans"]
     if getattr(args, "source", "sim") == "real":
         logger.info(f"Loading real sequence {args.real_seq} from {args.real_root} "
                     f"frames [{args.real_start}:{args.real_end}] stride={args.real_stride}")
