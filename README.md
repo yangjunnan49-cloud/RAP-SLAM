@@ -176,6 +176,35 @@ RAP-SLAM/
 - **PGO 黄金回归**（calibrated vs relfloor，unaligned/aligned）：七黄金全部 ±5% 以内；aligned 在 00/02/06live/posslive 上更好（02: 3.78 vs 4.04 m），poss_live 1.674 vs 1.757 m。按预先声明的准则（全胜才换默认）**relfloor 保持默认**；`loop_weighting="calibrated"` + `calib_params` 已接入 `pose_graph.py`（默认不变）。
 - **论文价值**：量化了"PGO 实践里固定 σ=0.2 m 的过自信程度"（2% 覆盖率）；证明 RAP 过门后边误差与其几何诊断近似无关→近常数标定 σ 就是正确模型；离散度是唯一有信号的轴但工程上不划算。属"标定 + 性质"型贡献，不必主张 PGO 精度增益。
 
+### P3a 团簇降权 vs NMS（2026-08-23，`scripts/eval_clique_weighting.py`，CPU-only）
+
+稠密同址回环簇（一次重访产生几十条强相关边）会让 PGO 把该址当超高置信约束。两条路线对比：现行 **NMS**（w=10，簇内只留最强边，丢弃其余）vs **clique 降权**（保留全部边但按相关性膨胀 σ——component 模式 σ·√k（k=连通簇大小）、degree 模式 σ·√(1+deg)）。`pose_graph.py` 新增 `clique_downweight={"component","degree"}` + `loop_clique_*` 参数（**默认 OFF，NMS 保持默认**）。产物 `output_clique_weighting/clique_report.{md,json}`。
+
+- **KITTI-06 live**（114 边单址稠密簇）：raw 3.169 → NMS 2.581 / clique-comp 2.642（unaligned）；**aligned clique-comp 0.872 全场最优**（NMS 0.893，raw 1.065）。
+- **KITTI-02 live**（182 边长链）：clique-deg unaligned **25.996 全场最优**（NMS 26.018）；component 模式在长链上过度合并为大连通分量 → 27.845 退化。
+- **KITTI-00 bigbudget**（40 边）：clique-comp 10.795 略优于 NMS 10.920。
+- 稀疏黄金必须是近 no-op：POSS live 1.757 / POSS 离线 1.821 逐位不变 ✅。
+- **结论**：NMS 保持默认（实现简单、06 unaligned 最优）；clique 降权是**不丢边的原理化替代**，aligned 口径下甚至更优——论文里作为 set-level 相关性的处理讨论，degree 模式优于 component。
+
+### P3b 地图一致性第二评测轴（2026-08-23，`scripts/eval_map_consistency.py`，CPU-only）
+
+轨迹 APE 之外补地图空间指标：对每个黄金，把关键帧扫描分别在里程计 / PGO（现行后端权威产物）/ GT 三套位姿下合图（扫描体素 0.4 m → 全局 0.3 m → 50 万点封顶），报**对称 Chamfer mean/p95**（对 GT 图）+ **留一扫描 crispness**（GT-free，点云"重影"度量，1 m 截断）。规范与 unaligned APE 相同的首位姿锚定（POSS GT 在全局系，必须先锚定否则 454 m 假象）。产物 `output_map_consistency/map_report.{md,json}`。
+
+| golden | Chamfer mean：odom → PGO | 轨迹 APE 对照 |
+|---|---|---|
+| POSS 离线 | 3.065 → **0.687**（−78%） | 8.26 → 1.82（−78%） |
+| POSS live | 3.067 → **0.660**（−78%） | 8.26 → 1.76 |
+| KITTI-06 离线 | 1.150 → 1.035 | 2.78 → 2.44 |
+| KITTI-06 live | 1.138 → 1.072 | 2.78 → 2.58 |
+| KITTI-05 | 3.081 → 1.973（−36%） | 5.19 → 3.42（−34%） |
+| KITTI-00 bb | 7.668 → 6.788（−11%） | 12.27 → 10.92（−13%） |
+| KITTI-02 live | 17.993 → 15.838（−12%） | 31.64 → 26.02（−18%） |
+
+- **7/7 黄金 PGO 后 Chamfer 全部改善**，且改善幅度与轨迹 APE 同步——地图轴独立验证了同一结论。
+- POSS live（2 回环）地图 0.660 ≈ POSS 离线（4 回环）0.687——地图空间下流式 2 环已逼近离线 4 环。
+- crispness 单调同向但动态范围小（0.24–0.52 m），适合作为 GT-free 的部署监控指标。
+- Chamfer p95 仍大（02: 41.7 m）——残差集中在无重访长段，与 RC-5/RC-4 结论互证：环侧工程已触及天花板，需前端升级。
+
 ## 路线图（RAP-CORE，2026-08-01 重构）
 
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。
