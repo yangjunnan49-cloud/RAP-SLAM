@@ -28,6 +28,19 @@ m) and is a no-op on sparse edge sets (POSS live 1.757 m bit-identical).
 Default OFF here (loop_nms_width=0 keeps the offline goldens bit-exact);
 the LIVE path opts in at w=10 (its cluster-persistence retrieval is
 deliberately uncapped; the offline pipeline is budget-capped).
+
+Clique down-weighting (2026-08-23, P3; scripts/eval_clique_weighting.py):
+a PRINCIPLED alternative to hard NMS suppression — keep every edge but
+inflate each edge's sigmas by k^exponent, where k counts the correlated
+same-site edges around it. Two clique definitions: "component" (union-find
+over Chebyshev-w adjacency in (i,j) space; k = component size) and
+"degree" (k = 1 + number of OTHER edges within w in both indices — a local
+density that does not chain along long clusters). Motivation: k fully
+correlated constraints carry ~1 edge's information; scaling sigma^2 by k
+(exponent 0.5) makes their total information equal to one edge. NMS
+discards information (keeps best-overlap only); clique modes keep all
+geometry. Empirically compared on the dense-cluster datasets (KITTI-06/02
+live) — see the eval script's report.
 """
 
 import logging
@@ -65,6 +78,9 @@ def _loop_noise(lc, base_sigmas, weighting, alpha_t, alpha_r,
         sigmas = np.array(base_sigmas) * s
     else:
         sigmas = np.array(base_sigmas)
+    cs = float(lc.get("clique_scale", 1.0))  # P3 clique down-weighting
+    if cs != 1.0:
+        sigmas = sigmas * cs
     return noiseModel.Diagonal.Sigmas(sigmas)
 
 
@@ -84,6 +100,60 @@ def nms_loop_edges(loop_constraints: List[dict],
     return kept
 
 
+def clique_downweight(loop_constraints: List[dict], width: float,
+                      exponent: float = 0.5,
+                      mode: str = "component") -> List[dict]:
+    """Attach per-edge `clique_scale` = k**exponent for correlated
+    same-site edges (see module docstring). mode="component": k = size of
+    the (i,j)-space Chebyshev-w connected component (union-find, chains
+    merge transitively). mode="degree": k = 1 + local neighbor count
+    within w in both indices (no transitive chaining).
+    """
+    n = len(loop_constraints)
+    if n == 0:
+        return []
+    if mode == "degree":
+        out = []
+        for a in range(n):
+            ea = loop_constraints[a]
+            deg = sum(1 for b in range(n) if b != a
+                      and abs(ea["i"] - loop_constraints[b]["i"]) <= width
+                      and abs(ea["j"] - loop_constraints[b]["j"]) <= width)
+            lc2 = dict(ea)
+            lc2["clique_size"] = 1 + deg
+            lc2["clique_scale"] = float((1 + deg) ** exponent)
+            out.append(lc2)
+        return out
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a in range(n):
+        ea = loop_constraints[a]
+        for b in range(a + 1, n):
+            eb = loop_constraints[b]
+            if abs(ea["i"] - eb["i"]) <= width and \
+                    abs(ea["j"] - eb["j"]) <= width:
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+    sizes: Dict[int, int] = {}
+    for a in range(n):
+        sizes[find(a)] = sizes.get(find(a), 0) + 1
+    out = []
+    for a, lc in enumerate(loop_constraints):
+        k = sizes[find(a)]
+        lc2 = dict(lc)
+        lc2["clique_size"] = k
+        lc2["clique_scale"] = float(k ** exponent)
+        out.append(lc2)
+    return out
+
+
 def optimize_pose_graph(
     odom_poses: List[np.ndarray],
     keyframes: List[int],
@@ -101,6 +171,9 @@ def optimize_pose_graph(
     relfloor_cap: float = 3.0,
     loop_nms_width: float = 0.0,
     calib_params=None,
+    loop_clique_width: float = 0.0,
+    loop_clique_exponent: float = 0.5,
+    loop_clique_mode: str = "component",
 ) -> Dict[int, np.ndarray]:
     """Optimize a keyframe pose graph.
 
@@ -153,13 +226,23 @@ def optimize_pose_graph(
         T_rel = np.linalg.inv(odom_poses[a]) @ odom_poses[b]
         graph.add(BetweenFactorPose3(a, b, Pose3(T_rel), odom_noise))
 
-    # RAP loop-closure edges (optionally NMS-deduped, RAP-adaptive +
-    # robust-kernelled).
+    # RAP loop-closure edges (optionally NMS-deduped, clique-down-weighted,
+    # RAP-adaptive + robust-kernelled).
     if loop_nms_width and loop_nms_width > 0:
         n_before = len(loop_constraints)
         loop_constraints = nms_loop_edges(loop_constraints, loop_nms_width)
         logger.info(f"Loop-edge NMS (w={loop_nms_width}): "
                     f"{n_before} -> {len(loop_constraints)} edges")
+    if loop_clique_width and loop_clique_width > 0:
+        loop_constraints = clique_downweight(loop_constraints,
+                                             loop_clique_width,
+                                             loop_clique_exponent,
+                                             loop_clique_mode)
+        ks = [lc["clique_size"] for lc in loop_constraints]
+        logger.info(f"Loop-edge clique down-weighting (w="
+                    f"{loop_clique_width}, mode={loop_clique_mode}): "
+                    f"{len(ks)} edges, clique sizes max {max(ks)}, "
+                    f"mean {np.mean(ks):.1f}")
     for lc in loop_constraints:
         i, j = lc["i"], lc["j"]
         if i not in kf_set or j not in kf_set:
