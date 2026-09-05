@@ -76,6 +76,16 @@ def parse_args():
     p.add_argument("--max-disp-r", type=float, default=30.0,
                    help="multigen gate: max inter-generation rotation "
                         "dispersion (deg); catches bistable yaw flips")
+    # S1a arm (2026-09-05, output_s1/s1_report.md): conformal acceptance
+    # gate with a finite-sample false-accept bound (alpha=0.05). Default
+    # "heuristic" keeps the two-metric gate (canonical goldens unchanged).
+    p.add_argument("--gate-mode", choices=["heuristic", "conformal"],
+                   default="heuristic",
+                   help="conformal = ConformalGate A1 (data/conformal_gate/"
+                        "A1.json) decides acceptance from overlap+mean_dist")
+    p.add_argument("--gate-model", default=None,
+                   help="explicit ConformalGate JSON path (overrides the "
+                        "default A1 model when --gate-mode conformal)")
     # RAP-CORE PGO (2026-08-01): floor-relative adaptive sigmas from RAP
     # mean_dist + Huber; best cross-dataset combo (eval_pgo_robust.py:
     # KITTI-02 27.387 -> 26.423 m, POSS bit-identical 1.757 m).
@@ -259,6 +269,16 @@ def main():
                              max_points_per_scan=args.rap_max_points,
                              feature_extraction_on=not args.no_rap_features,
                              seed=args.seed)
+            gate_model = None
+            if args.gate_mode == "conformal":
+                from rap_slam.conformal_gate import ConformalGate
+                gm_path = args.gate_model or os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(
+                        __file__))), "data/conformal_gate/A1.json")
+                gate_model = ConformalGate.load(gm_path)
+                logger.info(f"conformal gate loaded from {gm_path} "
+                            f"(Q={gate_model.Q:.4f}, alpha={gate_model.alpha}, "
+                            f"features={gate_model.features})")
             accepted = loop_closure.verify_candidates(
                 candidates, scans, odom_poses, rap,
                 trans_consistency=args.trans_consistency,
@@ -268,7 +288,8 @@ def main():
                 multigen_k=args.multigen_k,
                 min_overlap_min=args.min_overlap_min,
                 max_disp_r=args.max_disp_r,
-                gt_poses=gt_poses)
+                gt_poses=gt_poses,
+                gate_model=gate_model)
         else:
             logger.info("No loop candidates found")
     timings["loop_closure"] = time.time() - t0

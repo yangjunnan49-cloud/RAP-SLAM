@@ -85,6 +85,17 @@ def _loop_noise(lc, base_sigmas, weighting, alpha_t, alpha_r,
         sr = float(np.clip(cp.get("a_r", 0.15) * md ** cp.get("b_r", 1.0),
                            cp.get("floor_r", 0.001), cp.get("cap_r", 1.0)))
         sigmas = np.array([sr, sr, sr, st, st, st])
+    elif weighting == "per_edge":
+        # S1b: explicit per-edge sigmas attached to the loop record as
+        # sigma_t (m) / sigma_r (rad) — e.g. conformalized-quantile
+        # predictions from scripts/eval_conformal_s1.py. Falls back to
+        # relfloor when the record carries no explicit sigmas.
+        st, sr = lc.get("sigma_t"), lc.get("sigma_r")
+        if st is None or sr is None:
+            s = float(np.clip(md / relfloor_ref, 1.0, relfloor_cap))
+            sigmas = np.array(base_sigmas) * s
+        else:
+            sigmas = np.array([sr, sr, sr, st, st, st])
     elif weighting == "relfloor":
         s = float(np.clip(md / relfloor_ref, 1.0, relfloor_cap))
         sigmas = np.array(base_sigmas) * s
@@ -204,9 +215,11 @@ def optimize_pose_graph(
         odom_sigmas: sigmas for odometry between-factors.
         loop_sigmas: sigmas for loop between-factors (fixed weighting).
         loop_weighting: "fixed" (loop_sigmas for every edge), "adaptive"
-            (absolute per-edge sigmas from RAP mean_dist), or "relfloor"
-            (default; floor-relative loosening of edges sloppier than
-            relfloor_ref, safe on near-perfect edges).
+            (absolute per-edge sigmas from RAP mean_dist), "calibrated"
+            (P2 parametric model via calib_params), "per_edge" (S1b:
+            explicit sigma_t/sigma_r on each loop record, relfloor
+            fallback), or "relfloor" (default; floor-relative loosening of
+            edges sloppier than relfloor_ref, safe on near-perfect edges).
         robust_kernel: None, "huber", or "dcs" — wraps each loop edge's
             noise model in the corresponding robust mEstimator.
         huber_k: Huber kernel width (residual units of the whitened error).

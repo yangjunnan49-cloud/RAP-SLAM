@@ -1,6 +1,7 @@
 # Dataset (download separately, see README and scripts/download_poss_segment.py)
 /data/*
 !/data/literature/
+!/data/conformal_gate/
 
 # Experiment outputs (regenerable via scripts/run_pipeline.py and eval scripts)
 /output*

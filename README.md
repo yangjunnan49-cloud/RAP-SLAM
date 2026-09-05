@@ -244,6 +244,14 @@ RC-4 只评了 KITTI-02+POSS；本矩阵补齐**全部 7 黄金 × 3 种子 × 3
 - **吸收方式（按纲要）**：canonical golden 不动（修正改变输入点云，golden 仍作回归基线）；205 臂为论文 KITTI 报告臂，P5 对比表需用同惯例数字重算（待办：eval_paper_metrics 注册表加 205 臂条目）。
 - 产物：`output_prods/{kitti06_205,kitti05_205,kitti02_205,kitti02_base,kitti00_205}/` + `output_kitti205/kitti205_report.{md,json}`（均 gitignored）。
 
+### S1 共形验收门 + 共形化逐边 σ（2026-09-05，`scripts/build_s1_features.py` + `eval_conformal_s1.py`，CPU-only）——**门臂 PASS 已吸收为文档化臂；σ 臂 FAIL 回退（P2 结论加固）**
+
+- **数据基建**：`build_s1_features.py` 汇总**全部已存验证候选**（828 条：kitti02 终跑 256 + gatecheck 121 + bigbudget 121 + kitti06 live 114 + POSS live 2 + 重打分 acceptgate 19 + multigen 195；标签 safe 478 / dangerous 341 / gray 9，gray 为 gt_dist 10–20 m 且无 T_rel 的同街灰区拒绝候选），并为每条候选/边补两个新的决策前特征：**检索模糊度 margin**（SC d2−d1，d2 = 异址次近邻距离，排他窗 100 帧）与**退化因子**（X-ICP 式点到面信息矩阵 loc_t/loc_r + 协方差谱 scat，0.4 m 体素）。缓存于 `output_s1/cache/`。
+- **S1a 共形门**（split-conformal 假接收控制，α=0.05，危险类标定 → 有限样本保证 P(假接收)≤5%）：条款 1 **PASS**——主臂 A2（内蕴几何特征 [overlap, mean_dist, sc_d1, sc_margin, deg_loc_t, deg_loc_r, deg_scat]；按项目原则**不含里程计一致性**）在每个已存候选集上假接收 ≤ 启发式门且在其为零的集上全为零（kitti02 上 6/71 = 启发式同数同街边；multigen 重测上 3/6 < 启发式 5/6），总安全召回 **98.5%** ≥ 95%；TEST FPR 3.5%（界内）。A1（仅 overlap+mean_dist）召回 100% / FPR 5.3%（界+松弛内）；A3（multigen 子集 +overlap_min/disp_t）因危险样本仅 11 条 < α⁻¹≈20 而无法给出非空保证区（样本量可行性结论本身入档）。**注意**：严格标签（gt_te>5 m 为 dangerous）下启发式门在 kitti02 上有 6 条危险接收——历史"0/84"指拒绝候选全假，两者口径均已记录。
+- **S1b 共形化逐边 σ**（CQR，单侧 68.3% 上分位 + 共形裕量；与 P2 近常数模型在**精确等覆盖率**下比锐度）：条款 2 **FAIL**——新特征信号真实存在（deg_loc_t pearson −0.484、sc_margin +0.351、sc_d1 −0.351、overlap +0.285、disp_t +0.348、mean_dist ≈0 复证 P2），但最优 CQR 臂（gbm_ln）等覆盖宽度比 **0.937**（gt_re 0.906），未达 ≤0.90 门槛。条款 3（LOGO 逐边 σ 喂 PGO，per_edge 模式）：**PASS** 7/7（容差 +5% 内，live golden 略优：poss_live −5.3%、kitti06_live −1.4%；relfloor 重跑全部逐位复现 canonical）。按预声明 AND 门槛，S1b 整体不翻默认：**relfloor 保持默认，"过门后误差与诊断近似无关 → 近常数 σ 即正确模型"的结论在更强特征下复验成立**（P2 妥协点依法解锁但无需动用——这是更强的正证据而非叙事妥协）。
+- **吸收**：`rap_slam/conformal_gate.py`（ConformalGate：score/accept/fit/save/load）+ 部署模型 `data/conformal_gate/{A1,A2}.json`（全量 698 条标定，A1 Q=0.158 / A2 Q=0.404，带内假接收 10/220=4.5% ≤ α）已入版本库；`verify_candidates(gate_model=...)` + `run_pipeline.py --gate-mode conformal`（默认 heuristic 不变）；`pose_graph.py` 的 `loop_weighting="per_edge"`（逐边显式 σ_t/σ_r，relfloor 兜底）保留为可用模式。Live 节点接线（A2 需节点内 margin/退化特征）与 live A/B 为后续项。
+- 产物：`output_s1/{candidates.json, edges_v2.json, s1_report.md, s1_report.json, cache/}`（gitignored）。
+
 ## 路线图（RAP-CORE，2026-08-01 重构）
 
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。

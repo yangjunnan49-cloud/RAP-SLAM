@@ -78,7 +78,8 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
                       multigen_k: int = 1,
                       min_overlap_min: float = 0.4,
                       max_disp_r: float = 30.0,
-                      gt_poses: np.ndarray = None) -> List[dict]:
+                      gt_poses: np.ndarray = None,
+                      gate_model=None) -> List[dict]:
     """Verify loop candidates with RAP 2-way registration.
 
     A candidate (i, j) is accepted when the scans actually align after RAP
@@ -103,6 +104,11 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
         poses: odometry poses (for candidate prior and consistency check).
         rap_backend: RAPBackend instance.
         gt_poses: optional GT poses for logging true errors.
+        gate_model: optional rap_slam.conformal_gate.ConformalGate (S1a arm).
+            When given (and multigen_k == 1), acceptance is decided by the
+            conformal acceptance region on RAP's intrinsic diagnostics with a
+            finite-sample false-accept bound; the heuristic two-metric gate
+            is the fallback when a feature is missing.
 
     Returns:
         List of accepted constraint dicts: {i, j, T_rel, overlap, t_trans_err,
@@ -157,6 +163,20 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
                     f"overlap_min={diag['overlap_min']:.2f} "
                     f"disp_t={diag['disp_t']:.2f} m "
                     f"disp_r={diag['disp_r']:.1f} deg")
+        elif gate_model is not None:
+            # S1a arm: conformal acceptance region (finite-sample
+            # false-accept bound; rap_slam/conformal_gate.py). Uses the RAP
+            # intrinsic diagnostics only; a None verdict (missing features)
+            # falls back to the heuristic gate.
+            s = gate_model.score({"overlap": overlap, "mean_dist": mean_dist})
+            if s is None:
+                ok = (overlap >= min_overlap and
+                      (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist))
+                msg += " | conformal n/a (heuristic fallback)"
+            else:
+                ok = s < gate_model.Q
+                msg += (f" | conformal danger={s:.3f} "
+                        f"Q={gate_model.Q:.3f}")
         else:
             ok = (overlap >= min_overlap and
                   (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist))
