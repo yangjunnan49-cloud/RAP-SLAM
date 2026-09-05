@@ -221,6 +221,29 @@ RC-4 只评了 KITTI-02+POSS；本矩阵补齐**全部 7 黄金 × 3 种子 × 3
 - **已落地**：`rap_slam/spires_dataset.py`（二进制 PCD 解析 + TUM GT + 时间戳最近邻匹配）；`run_pipeline.py --source spires`；`scripts/select_spires_sequence.py`（GT 重访结构分析）；`scripts/download_spires.sh`（`gt` / `clouds <seq>`，校验+续传+重试）。GT 收割进行中（`E:\githouse\Datasets\oxford_spires\gt\`）；已见 keble-02（294 m/15 址）、keble-04（783 m/69 址）、christ-church-02（642 m/39 址）。
 - **下一步**：收 GT → 定序列（首选 keble-02，POSS-A 尺度）→ 下点云 → ** canonical 参数零调参冒烟** `--source spires --loop-sep 200` → 按 eval_paper_metrics 口径记录 aligned ATE/ter/回环统计，作为跨传感器表格行。
 
+### S0a GNC-TLS 鲁棒后端检验（2026-09-05，`scripts/eval_gnc_backend.py`，CPU-only）——**门槛 FAIL，发现已归档**
+
+- **动机**：182 条 KITTI-02 已接受边中有 57 条同街混叠边（T_rel 真误差中位 2.65 m、最差 15 m），Huber 只能压幅值不能剔除；GNC-TLS（Yang et al. T-RO 2020）理论上能整体剔除。`pose_graph.py` 新增 `robust_kernel="gnc_tls"/"gnc_gm"`（默认仍 `huber`）：先验+里程计边经 `knownInliers` 锁定，仅回环边按各自噪声模型导出的内点阈值（`gnc_prob=0.99`）做渐进非凸剔除；支持 `gnc_out` 诊断（逐边权重、剔除数）。
+- **结果**（7 golden 全扫描，canonical 臂全部逐位复现参考值）：稀疏 golden 上 GNC 一条不剔、结果与 canonical 一致；kitti02_live 后 NMS 的 38 条边只剔 1 条，APE 26.128（vs 26.018）；标定 σ 臂（gnc_a2）把 02 对齐 APE 压到 3.781、poss_live 1.674，但 kitti06_off 退化 +3.4% 超 2% 稀疏条款。NMS-off 臂（182 条全喂）剔 21 条仍更差（28.2 m）。
+- **阈值敏感性诊断**（防审稿人问"调过没有"）：prob ∈ {0.68, 0.90, 0.99} 在 02 上 APE 26.13–26.14 m 无差异——**同街混叠边是"局部自洽"的，外点模型（TLS/Huber）在原理上就看不见它们；密集簇过权是相关问题（NMS/团簇降权）而非外点问题**。此结论收入失效分类学，Huber+relfloor 维持默认。
+- 产物：`output_gnc_backend/gnc_report.{md,json}`（gitignored，~1 min 可重生成）。
+
+### S0b KITTI 0.205° 内参修正臂（2026-09-05，`scripts/run_s0b_kitti205.sh` + `eval_kitti205.py`）——**门槛 PASS，采纳为论文报告臂**
+
+- **约定核实**：逐点绕 `normalize(p × ẑ)` 轴旋转 +0.205°（CT-ICP `dataset.cpp` 的 `KITTI_GLOBAL_VERTICAL_ANGLE_OFFSET`，MULLS/Traj-LO 同惯例；CT-ICP 论文 arXiv:2109.12979 正文 0.205°）。`real_dataset.kitti_vertical_correction` 向量化实现，与逐点 Rodrigues 对照误差 3.6e-15；`run_pipeline.py --apply-kitti-205`（强制要求 `--real-apply-calib`，POSS 永不可用）。
+- **结果**（canonical 参数零调参，四条全序列，修正仅作用于输入点云）：
+
+  | 序列 | ter % 前→后 | 里程计 APE 前→后 | PGO APE 前→后 |
+  |---|---|---|---|
+  | KITTI 06 | 0.583 → **0.246** | 2.777 → 1.697 | 2.441 → **1.332**（12/12 回环全真） |
+  | KITTI 05 | 0.764 → **0.321** | 5.194 → 3.562 | 3.417 → **2.025**（12/12） |
+  | KITTI 02 | 1.234 → **0.527** | 31.640 → 17.912 | 27.97 → **12.96**（12/12，预算 12） |
+  | KITTI 00 | 0.902 → **0.506** | 12.267 → 7.548 | 6.78（预算 12，不可比 golden 的预算 40） |
+
+- **门槛判定**：ter 4/4 序列改善（需 ≥3），里程计 APE 全线改善（需无 >2% 退化）→ **PASS**。odom ter 已与 CT-ICP 同档（06：0.246 vs 0.27；00：0.506 vs 0.49）——P0 记录的"我们 ter 约为 CT-ICP 两倍"的弱点基本闭合，横向对比表的叙事空间明显扩大。
+- **吸收方式（按纲要）**：canonical golden 不动（修正改变输入点云，golden 仍作回归基线）；205 臂为论文 KITTI 报告臂，P5 对比表需用同惯例数字重算（待办：eval_paper_metrics 注册表加 205 臂条目）。
+- 产物：`output_prods/{kitti06_205,kitti05_205,kitti02_205,kitti02_base,kitti00_205}/` + `output_kitti205/kitti205_report.{md,json}`（均 gitignored）。
+
 ## 路线图（RAP-CORE，2026-08-01 重构）
 
 **核心目标：以 RAP 为核心的 SLAM（RAP-CORE）**——每个环节要么由 RAP 完成，要么围绕 RAP 的能力与输出设计，而不是把 RAP 当作可替换的验证插件。

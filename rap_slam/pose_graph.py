@@ -41,6 +41,18 @@ correlated constraints carry ~1 edge's information; scaling sigma^2 by k
 discards information (keeps best-overlap only); clique modes keep all
 geometry. Empirically compared on the dense-cluster datasets (KITTI-06/02
 live) — see the eval script's report.
+
+GNC-TLS loop-edge rejection (2026-09-05, S0a; scripts/eval_gnc_backend.py):
+robust_kernel="gnc_tls"/"gnc_gm" replaces the per-edge robust mEstimator
+with GTSAM's graduated non-convexity optimizer (Yang et al. T-RO 2020,
+arXiv:1909.08605): odometry/prior factors are pinned via `knownInliers`,
+only loop edges are graduated between inlier/outlier using per-factor
+inlier cost thresholds derived from each edge's OWN noise model
+(setInlierCostThresholdsAtProbability(gnc_prob)) — so relfloor/calibrated
+per-edge sigmas directly set each edge's rejection threshold. Unlike Huber
+(bounded influence, never rejects), TLS can fully reject the heavy-tailed
+same-street aliasing edges (KITTI-02 live: 57 edges with 2.65 m median /
+15 m worst true error). Default OFF (robust_kernel="huber" unchanged).
 """
 
 import logging
@@ -174,6 +186,10 @@ def optimize_pose_graph(
     loop_clique_width: float = 0.0,
     loop_clique_exponent: float = 0.5,
     loop_clique_mode: str = "component",
+    gnc_prob: float = 0.99,
+    gnc_mu_step: float = 1.4,
+    gnc_max_iterations: int = 100,
+    gnc_out: dict = None,
 ) -> Dict[int, np.ndarray]:
     """Optimize a keyframe pose graph.
 
@@ -199,6 +215,18 @@ def optimize_pose_graph(
             translation/rotation sigmas on the edge's RAP mean_dist.
         relfloor_ref/relfloor_cap: reference mean_dist (m) and max loosening
             factor for the "relfloor" weighting.
+        robust_kernel: None, "huber", "dcs", "gnc_tls", or "gnc_gm" — the
+            first two wrap each loop edge's noise model in a robust
+            mEstimator; the gnc_* modes leave the noise Gaussian and instead
+            run GTSAM's GNC optimizer, which graduates each loop edge
+            between inlier/outlier (odometry/prior pinned as knownInliers).
+        gnc_prob: chi-square probability for each loop edge's inlier cost
+            threshold, derived from that edge's own noise model (only used
+            by the gnc_* modes).
+        gnc_mu_step/gnc_max_iterations: GNC non-convexity growth rate and
+            outer-iteration cap.
+        gnc_out: optional dict filled with GNC diagnostics: per-factor
+            weights, loop-edge weights, and the rejected count (w < 0.5).
 
     Returns:
         {keyframe_index: optimized 4x4 pose}.
@@ -225,6 +253,11 @@ def optimize_pose_graph(
     for a, b in zip(keyframes[:-1], keyframes[1:]):
         T_rel = np.linalg.inv(odom_poses[a]) @ odom_poses[b]
         graph.add(BetweenFactorPose3(a, b, Pose3(T_rel), odom_noise))
+
+    # GNC modes: everything before the loop edges (prior + odometry chain)
+    # is pinned as a known inlier; only loop edges are graduated.
+    use_gnc = robust_kernel in ("gnc_tls", "gnc_gm")
+    n_known = graph.size() if use_gnc else 0
 
     # RAP loop-closure edges (optionally NMS-deduped, clique-down-weighted,
     # RAP-adaptive + robust-kernelled).
@@ -257,15 +290,44 @@ def optimize_pose_graph(
         elif robust_kernel == "dcs":
             noise = noiseModel.Robust.Create(
                 noiseModel.mEstimator.DCS(dcs_phi), noise)
+        # gnc_* modes keep the plain Gaussian noise: GNC derives each edge's
+        # inlier cost threshold from it (gnc_prob) and graduates the weight.
         graph.add(BetweenFactorPose3(i, j, Pose3(lc["T_rel"]), noise))
 
-    params = gtsam.LevenbergMarquardtParams()
-    params.setMaxIterations(100)
-    optimizer = LevenbergMarquardtOptimizer(graph, initial, params)
-    result = optimizer.optimize()
-    logger.info(f"PGO: {graph.size()} factors, {len(keyframes)} nodes, "
-                f"error {optimizer.iterations()} iters: "
-                f"{graph.error(initial):.4f} -> {graph.error(result):.4f}")
+    if use_gnc:
+        gnc_params = gtsam.GncLMParams()
+        gnc_params.setKnownInliers(list(range(n_known)))
+        gnc_params.setLossType(
+            gtsam.GncLossType.TLS if robust_kernel == "gnc_tls"
+            else gtsam.GncLossType.GM)
+        gnc_params.setMuStep(gnc_mu_step)
+        gnc_params.setMaxIterations(gnc_max_iterations)
+        gnc_params.baseOptimizerParams.setMaxIterations(50)
+        optimizer = gtsam.GncLMOptimizer(graph, initial, gnc_params)
+        optimizer.setInlierCostThresholdsAtProbability(gnc_prob)
+        result = optimizer.optimize()
+        weights = np.asarray(optimizer.getWeights())
+        loop_w = weights[n_known:]
+        n_rej = int(np.sum(loop_w < 0.5))
+        logger.info(f"PGO[GNC-{robust_kernel[4:].upper()}]: {graph.size()} "
+                    f"factors, {len(keyframes)} nodes; loop edges "
+                    f"{len(loop_w)} kept / {n_rej} rejected (w<0.5); "
+                    f"error {graph.error(initial):.4f} -> "
+                    f"{graph.error(result):.4f}")
+        if gnc_out is not None:
+            gnc_out["weights"] = weights
+            gnc_out["loop_weights"] = loop_w
+            gnc_out["n_rejected"] = n_rej
+            gnc_out["n_loop"] = len(loop_w)
+    else:
+        params = gtsam.LevenbergMarquardtParams()
+        params.setMaxIterations(100)
+        optimizer = LevenbergMarquardtOptimizer(graph, initial, params)
+        result = optimizer.optimize()
+        logger.info(f"PGO: {graph.size()} factors, {len(keyframes)} nodes, "
+                    f"error {optimizer.iterations()} iters: "
+                    f"{graph.error(initial):.4f} -> "
+                    f"{graph.error(result):.4f}")
 
     return {k: result.atPose3(k).matrix() for k in keyframes}
 

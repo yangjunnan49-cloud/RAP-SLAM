@@ -115,6 +115,10 @@ def parse_args():
     p.add_argument("--real-apply-calib", action="store_true",
                    help="apply Tr velo<->cam conversion (KITTI convention; "
                         "POSS poses are already in the LiDAR/world frame)")
+    p.add_argument("--apply-kitti-205", action="store_true",
+                   help="apply the 0.205-deg HDL-64 intrinsic vertical-angle "
+                        "correction (CT-ICP/MULLS/Traj-LO KITTI convention); "
+                        "only legal together with --real-apply-calib")
     # --- Oxford Spires (P4 cross-sensor zero-shot) ---
     p.add_argument("--spires-root",
                    default="/mnt/e/githouse/Datasets/oxford_spires",
@@ -144,11 +148,17 @@ def get_sequence(args):
     if getattr(args, "source", "sim") == "real":
         logger.info(f"Loading real sequence {args.real_seq} from {args.real_root} "
                     f"frames [{args.real_start}:{args.real_end}] stride={args.real_stride}")
+        kitti205 = bool(getattr(args, "apply_kitti_205", False))
+        if kitti205 and not getattr(args, "real_apply_calib", False):
+            raise ValueError("--apply-kitti-205 is only legal for KITTI "
+                             "odometry (requires --real-apply-calib); never "
+                             "apply it to POSS or other sensors")
         data = real_dataset.load_real_sequence(
             args.real_root, sequence_id=args.real_seq,
             start=args.real_start, end=args.real_end,
             min_range=1.5, stride=args.real_stride,
-            apply_calib=getattr(args, "real_apply_calib", False))
+            apply_calib=getattr(args, "real_apply_calib", False),
+            kitti205=kitti205)
         return data["gt_poses"], data["scans"]
     seq_dir = os.path.join(args.output, "sequence")
     gt_file = os.path.join(seq_dir, "gt_poses.txt")

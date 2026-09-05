@@ -60,9 +60,37 @@ def load_gt_poses(poses_file: str, calib_file: str,
     return poses[start:end_idx + 1]
 
 
+def kitti_vertical_correction(points: np.ndarray,
+                              angle_deg: float = 0.205) -> np.ndarray:
+    """KITTI HDL-64 intrinsic vertical-angle correction (S0b).
+
+    Exact CT-ICP convention (jedeschaud/ct_icp src/ct_icp/dataset.cpp,
+    KITTI_GLOBAL_VERTICAL_ANGLE_OFFSET = 0.205, "Issue in the intrinsic
+    calibration of the KITTI Velodyne HDL64"; same convention in MULLS /
+    Traj-LO): every point p is rotated by +angle about the horizontal axis
+    a = normalize(p x z_hat) — i.e. the axis perpendicular to the point's
+    azimuth direction. Since a is perpendicular to p, Rodrigues reduces to
+        p' = p cos(t) + (-x*z/rho, -y*z/rho, rho) sin(t),
+    rho = sqrt(x^2+y^2). Points with rho ~ 0 (near-vertical) are untouched.
+    """
+    t = np.deg2rad(angle_deg)
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    rho = np.hypot(x, y)
+    safe = rho > 1e-6
+    c, s = np.cos(t), np.sin(t)
+    out = points.copy()
+    sxz = np.where(safe, x * z / np.maximum(rho, 1e-6), 0.0)
+    syz = np.where(safe, y * z / np.maximum(rho, 1e-6), 0.0)
+    sz = np.where(safe, rho, 0.0)
+    out[:, 0] = np.where(safe, x * c - sxz * s, x)
+    out[:, 1] = np.where(safe, y * c - syz * s, y)
+    out[:, 2] = np.where(safe, z * c + sz * s, z)
+    return out
+
+
 def load_scans(velodyne_dir: str, start: int = 0, end: Optional[int] = None,
                min_range: float = 0.0, max_range: float = 0.0,
-               stride: int = 1) -> Tuple[List[np.ndarray], List[str]]:
+               stride: int = 1, kitti205: bool = False) -> Tuple[List[np.ndarray], List[str]]:
     """Load .bin scans whose frame number (filename stem) is in [start..end].
 
     Selection is by absolute frame number, matching the GT pose indexing —
@@ -83,6 +111,8 @@ def load_scans(velodyne_dir: str, start: int = 0, end: Optional[int] = None,
             if max_range > 0.0:
                 keep &= r <= max_range
             pts = pts[keep]
+        if kitti205:
+            pts = kitti_vertical_correction(pts)
         scans.append(pts.astype(np.float32))
         used.append(path)
     logger.info(f"Loaded {len(scans)} scans from {velodyne_dir} "
@@ -94,7 +124,8 @@ def load_scans(velodyne_dir: str, start: int = 0, end: Optional[int] = None,
 def load_real_sequence(root: str, sequence_id: str = "00",
                        start: int = 0, end: Optional[int] = None,
                        min_range: float = 0.0, max_range: float = 0.0,
-                       stride: int = 1, apply_calib: bool = False) -> dict:
+                       stride: int = 1, apply_calib: bool = False,
+                       kitti205: bool = False) -> dict:
     """Load a KITTI-format real sequence segment.
 
     Args:
@@ -106,6 +137,9 @@ def load_real_sequence(root: str, sequence_id: str = "00",
         stride: take every k-th frame.
         apply_calib: True for KITTI odometry (cam-frame poses); False for
             POSS (poses already in the LiDAR/world frame).
+        kitti205: apply the 0.205-deg intrinsic vertical-angle correction
+            (CT-ICP/MULLS/Traj-LO KITTI convention; KITTI HDL-64 ONLY —
+            never for POSS or other sensors).
     """
     poses_file = os.path.join(root, "dataset", "poses", f"{sequence_id}.txt")
     seq_dir = os.path.join(root, "dataset", "sequences", sequence_id)
@@ -116,7 +150,7 @@ def load_real_sequence(root: str, sequence_id: str = "00",
                              apply_calib=apply_calib)
     scans, scan_files = load_scans(velodyne_dir, start=start, end=end,
                                    min_range=min_range, max_range=max_range,
-                                   stride=stride)
+                                   stride=stride, kitti205=kitti205)
     if stride > 1:
         gt_poses = gt_poses[::stride]
     assert len(gt_poses) == len(scans), \
