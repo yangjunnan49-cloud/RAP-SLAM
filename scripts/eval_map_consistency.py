@@ -12,13 +12,14 @@ odometry, PGO (canonical/current backend), and GT — and report:
       scan (leave-one-scan-out), capped at 1 m. Measures double-vision /
       blur without needing GT.
 
-Maps: per-scan voxel 0.4 m, merged, global voxel 0.3 m, random-capped at
+Maps: per-scan voxel 0.4 m, merged, per-observation voxel 0.3 m, random-capped at
 500k points (seed 0). cKDTree queries; CPU-only.
 
 Run (WSL2 conda rap-inference):
-  python scripts/eval_map_consistency.py
+  python scripts/eval_map_consistency.py --out output_map_consistency_v2
 """
 
+import argparse
 import json
 import logging
 import os
@@ -76,7 +77,7 @@ def build_map(scans: ScanProvider, keyframes: List[int],
         labels.append(np.full(len(pts), li, dtype=np.int32))
     all_pts = np.concatenate(clouds)
     all_lab = np.concatenate(labels)
-    keys = np.floor(all_pts / 0.3).astype(np.int64)
+    keys = np.column_stack((all_lab, np.floor(all_pts / 0.3).astype(np.int64)))
     _, sel = np.unique(keys, axis=0, return_index=True)
     all_pts, all_lab = all_pts[sel], all_lab[sel]
     if len(all_pts) > cap:
@@ -95,26 +96,53 @@ def chamfer(a: np.ndarray, b: np.ndarray):
 
 
 def crispness(pts: np.ndarray, labels: np.ndarray, cap_r: float = 1.0):
-    """Leave-one-scan-out NN distance (capped). k=8 query, first foreign
-    label wins."""
+    """Exact capped nearest distance to a different scan in the retained map.
+
+    Adaptive queries terminate once a foreign observation is found, the cap
+    radius is exhausted, or all retained points have been searched. The input
+    map may be sampled; this is not an independent survey-reference metric.
+    """
     from scipy.spatial import cKDTree
-    _, idxs = cKDTree(pts).query(pts, k=8)
-    own = labels[:, None]
-    foreign = labels[idxs] != own
-    first = np.argmax(foreign, axis=1)
-    has = foreign[np.arange(len(pts)), first]
-    d = np.linalg.norm(pts - pts[idxs[np.arange(len(pts)), first]], axis=1)
-    d = np.minimum(d, cap_r)
-    d[~has] = cap_r
-    return float(np.mean(d)), float(np.quantile(d, 0.95))
+    pts, labels = np.asarray(pts), np.asarray(labels)
+    if pts.shape != (len(labels), 3) or not len(pts) or not np.isfinite(pts).all():
+        raise ValueError("Expected nonempty finite points and one label per point")
+    if not np.isfinite(cap_r) or cap_r <= 0:
+        raise ValueError("cap_r must be positive and finite")
+    distances = np.full(len(pts), cap_r, dtype=float)
+    if len(np.unique(labels)) > 1:
+        tree = cKDTree(pts)
+        pending = np.arange(len(pts))
+        k = min(8, len(pts))
+        while len(pending):
+            # Bound memory even for dense single-scan neighborhoods.
+            next_pending = []
+            chunk_size = max(1, 1_000_000 // k)
+            for begin in range(0, len(pending), chunk_size):
+                query = pending[begin:begin + chunk_size]
+                d, idx = tree.query(pts[query], k=k, distance_upper_bound=cap_r)
+                d, idx = np.asarray(d).reshape(len(query), k), np.asarray(idx).reshape(len(query), k)
+                valid = idx < len(pts)
+                foreign = valid & (labels[np.minimum(idx, len(pts) - 1)] != labels[query, None])
+                best = np.min(np.where(foreign, d, cap_r), axis=1)
+                distances[query] = best
+                unresolved = (~foreign.any(axis=1)) & valid.all(axis=1)
+                if k < len(pts):
+                    next_pending.extend(query[unresolved])
+            pending = np.asarray(next_pending, dtype=int)
+            k = min(k * 2, len(pts))
+    return float(np.mean(distances)), float(np.quantile(distances, 0.95))
+
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s: "
                                "%(message)s", datefmt="%H:%M:%S")
-    out_dir = os.path.join(REPO_ROOT, "output_map_consistency")
-    os.makedirs(out_dir, exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", required=True, help="New output directory; existing paths are rejected")
+    args = parser.parse_args()
+    out_dir = args.out
+    os.makedirs(out_dir, exist_ok=False)
 
     lines = ["# P3b — map-consistency axis (odometry vs PGO; GT map as "
              "reference)", ""]

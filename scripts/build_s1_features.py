@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""S1 prep — build the candidate universe (S1a) and enrich the P2 edge
+"""LEGACY S1 BUILDER: F04-F06 invalidate its feature/label assembly.
+New work uses build_s1_dataset_v2.py. Helpers remain importable.
+
+Historical description follows.
+S1 prep — build the candidate universe (S1a) and enrich the P2 edge
 dataset (S1b) with two NEW pre-acceptance features:
 
   1. retrieval-ambiguity margin (sc_margin): for candidate (i, j),
@@ -432,62 +436,7 @@ def attach_deg(rec: dict, deg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(name)s %(levelname)s: "
-                        "%(message)s", datefmt="%H:%M:%S")
-    os.makedirs(OUT, exist_ok=True)
-    reg = build_registry()
-    logger.info("registry: " + ", ".join(
-        f"{k}({len(v.keyframes)} kf)" for k, v in reg.items()))
-
-    cands = assemble_candidates(reg)
-    by_ds = {}
-    for c in cands:
-        by_ds.setdefault(c["ds"], []).append(c)
-    logger.info("candidates: " + ", ".join(
-        f"{k}={len(v)}" for k, v in sorted(by_ds.items())))
-
-    attach_labels(cands, reg)
-    n_lab = {}
-    for c in cands:
-        n_lab[c["label"]] = n_lab.get(c["label"], 0) + 1
-    logger.info(f"labels: {n_lab}")
-
-    edges = json.load(open(os.path.join(
-        REPO_ROOT, "output_calibrated/edge_dataset.json")))
-    edge_ref = {"kitti02": "kitti02", "poss_off": "poss_off",
-                "poss_live": "poss_live", "possb": "possb",
-                "kitti00": "kitti00", "kitti05": "kitti05",
-                "kitti06_off": "kitti06_off", "kitti06_live": "kitti06_live"}
-
-    needed: Dict[str, set] = {k: set(v.keyframes) for k, v in reg.items()}
-    for c in cands:
-        needed[CAND_REF[c["ds"]]].update((c["i"], c["j"]))
-    for e in edges:
-        needed[edge_ref[e["ds"]]].update((e["i"], e["j"]))
-    logger.info("scans needed: " + ", ".join(
-        f"{k}={len(v)}" for k, v in sorted(needed.items())))
-    compute_features(reg, needed)
-
-    caches = {name: load_cache(name) for name in needed}
-    for c in cands:
-        ref = CAND_REF[c["ds"]]
-        scs, deg = caches[ref]
-        attach_sc_margin(c, reg[ref], scs)
-        attach_deg(c, deg)
-    for e in edges:
-        ref = edge_ref[e["ds"]]
-        scs, deg = caches[ref]
-        attach_sc_margin(e, reg[ref], scs)
-        attach_deg(e, deg)
-
-    with open(os.path.join(OUT, "candidates.json"), "w") as f:
-        json.dump(cands, f)
-    with open(os.path.join(OUT, "edges_v2.json"), "w") as f:
-        json.dump(edges, f)
-    n_feat = sum(1 for c in cands if c.get("sc_margin") is not None)
-    logger.info(f"Wrote {OUT}/candidates.json ({len(cands)}; "
-                f"{n_feat} with sc features) + edges_v2.json ({len(edges)})")
+    raise RuntimeError("Legacy S1 assembly is disabled after F04-F06; use build_s1_dataset_v2.py --out NEW_DIRECTORY")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+{
+  "original_head": "6d3f2d22cedfe1f807deb11fd8796b9f5bf17cd6",
+  "original_branch": "codex/e0-f1-20260926",
+  "selected_untracked": 42,
+  "externalized": 0,
+  "credential_pattern_hits": 0,
+  "current_unit_tests": {
+    "passed": 19,
+    "failed": 0
+  },
+  "raw_assets_rehashed_this_round": false
+}

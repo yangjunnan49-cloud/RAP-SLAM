@@ -75,6 +75,8 @@ class Open3DICPOdometry:
 
     def _prep(self, scan: np.ndarray):
         import open3d as o3d
+        if self.max_range > 0:
+            scan = scan[np.linalg.norm(scan, axis=1) <= self.max_range]
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(scan.astype(np.float64))
         pcd = pcd.voxel_down_sample(self.voxel_size)
@@ -106,7 +108,11 @@ class Open3DICPOdometry:
 
 
 def run_odometry(scans: List[np.ndarray], prefer_kiss: bool = True,
-                 max_range: float = 60.0, deskew: bool = False) -> tuple:
+                 max_range: float = 60.0, deskew: bool = False,
+                 allow_fallback: bool = False,
+                 min_range: float = 1.5,  # [meeting-20260921] pass-through, KISS-aligned default set by caller
+                 voxel_size: float = 0.8,  # [meeting-20260921] pass-through, KISS-aligned default set by caller
+                 ) -> tuple:
     """Run odometry over all scans.
 
     deskew: synthesize per-point azimuth timestamps and enable KISS-ICP motion
@@ -117,13 +123,19 @@ def run_odometry(scans: List[np.ndarray], prefer_kiss: bool = True,
         poses: list of (4, 4) sensor-to-world poses (len == len(scans)).
         backend_name: which backend actually ran.
     """
+    if not scans:
+        raise ValueError("No scans supplied to odometry")
     backend = None
     if prefer_kiss:
         try:
-            candidate = KissOdometry(max_range=max_range, deskew=deskew)
+            candidate = KissOdometry(max_range=max_range, deskew=deskew,
+                                     min_range=min_range,  # [meeting-20260921]
+                                     voxel_size=voxel_size)  # [meeting-20260921]
             candidate.register(scans[0])  # smoke-test on the first scan
             backend = candidate
         except Exception as e:
+            if not allow_fallback:
+                raise RuntimeError("KISS-ICP initialization/first scan failed; fallback is disabled") from e
             logger.warning(f"KISS-ICP failed to initialize/run ({e}); "
                            f"falling back to Open3D ICP")
             backend = None

@@ -8,9 +8,9 @@ compute three metric families against ground truth:
 2. ALIGNED APE: evo SE(3) Umeyama alignment first (--align convention used by
    most of the SLAM literature's "ATE RMSE" tables). NOT comparable to (1) —
    this is the number to use for horizontal comparison.
-3. KITTI official relative drift: mean relative translational error (%) and
+3. KITTI-style relative drift: mean relative translational error (%) and
    rotational error (deg/100 m) over subsegments of length 100..800 m
-   (per-length mean, then averaged over the 8 lengths; start-step 10 frames,
+   (all-segment mean; strict distance endpoint; start-step 10 frames,
    matching the official devkit convention). Gauge-invariant, so frame
    anchoring does not matter.
 
@@ -39,6 +39,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
 from rap_slam import evaluate, real_dataset  # noqa: E402
+from rap_slam.trajectory_protocol import kitti_drift, validate_pair, validate_ids, validate_stamps
 
 logger = logging.getLogger("eval_paper_metrics")
 
@@ -61,16 +62,21 @@ def load_kitti_format(path: str) -> List[np.ndarray]:
     return list(poses)
 
 
-def load_tum(path: str) -> List[np.ndarray]:
+def load_tum(path: str, return_timestamps=False) -> List[np.ndarray]:
     """Load TUM rows (stamp tx ty tz qx qy qz qw) — same math as verify scripts."""
     rows = np.loadtxt(path)
     if rows.ndim == 1:
         rows = rows[None, :]
+    if rows.ndim != 2 or rows.shape[1] != 8 or not np.isfinite(rows).all():
+        raise ValueError("TUM requires finite timestamp + seven pose values")
+    stamps = validate_stamps(rows[:, 0])
     poses = []
     for r in rows:
         t = r[1:4]
         qx, qy, qz, qw = r[4:8]
         n_ = qx * qx + qy * qy + qz * qz + qw * qw
+        if n_ < 1e-12:
+            raise ValueError("Zero TUM quaternion")
         s = 2.0 / n_
         xx, yy, zz = qx * qx * s, qy * qy * s, qz * qz * s
         xy, xz, yz = qx * qy * s, qx * qz * s, qy * qz * s
@@ -81,7 +87,7 @@ def load_tum(path: str) -> List[np.ndarray]:
                      [xz - wy, yz + wx, 1 - (xx + yy)]]
         T[:3, 3] = t
         poses.append(T)
-    return poses
+    return (stamps, poses) if return_timestamps else poses
 
 
 # ---------------------------------------------------------------------------
@@ -99,57 +105,15 @@ def path_length(poses: List[np.ndarray]) -> float:
     return float(np.sum(np.linalg.norm(np.diff(t, axis=0), axis=1)))
 
 
-def kitti_drift(gt: List[np.ndarray], est: List[np.ndarray],
-                step: int = 10) -> Dict[str, float]:
-    """KITTI official relative drift over 100..800 m subsegments.
-
-    Per subsegment: t_err = |t_err| / L (fraction), r_err = angle / L
-    converted to deg/100 m. Per-length mean, then averaged over lengths.
-    Start frames advance by `step` (devkit convention).
-    """
-    lengths = [100, 200, 300, 400, 500, 600, 700, 800]
-    gt_t = [p[:3, 3] for p in gt]
-    # cumulative GT path distance
-    cum = [0.0]
-    for i in range(1, len(gt_t)):
-        cum.append(cum[-1] + float(np.linalg.norm(gt_t[i] - gt_t[i - 1])))
-    cum = np.asarray(cum)
-
-    t_means, r_means = [], []
-    n_frames = len(gt)
-    for L in lengths:
-        t_errs, r_errs = [], []
-        for first in range(0, n_frames, step):
-            # first frame where the GT path covers L metres
-            last = int(np.searchsorted(cum, cum[first] + L))
-            if last >= n_frames:
-                continue
-            d_gt = np.linalg.inv(gt[first]) @ gt[last]
-            d_est = np.linalg.inv(est[first]) @ est[last]
-            err = np.linalg.inv(d_gt) @ d_est
-            t_errs.append(float(np.linalg.norm(err[:3, 3])) / L)
-            cos = np.clip((np.trace(err[:3, :3]) - 1.0) / 2.0, -1.0, 1.0)
-            r_errs.append(float(np.arccos(cos)) / L * 180.0 / np.pi * 100.0)
-        if t_errs:
-            t_means.append(float(np.mean(t_errs)))
-            r_means.append(float(np.mean(r_errs)))
-    if not t_means:
-        return {"kitti_ter_pct": float("nan"), "kitti_rer_deg100m": float("nan"),
-                "kitti_segments": 0}
-    return {"kitti_ter_pct": 100.0 * float(np.mean(t_means)),
-            "kitti_rer_deg100m": float(np.mean(r_means)),
-            "kitti_segments": len(t_means)}
-
-
-def evaluate_pair(gt: List[np.ndarray], est: List[np.ndarray]) -> Dict[str, float]:
+def evaluate_pair(gt: List[np.ndarray], est: List[np.ndarray], source_frame_ids=None) -> Dict[str, float]:
     """All metric families for one estimate trajectory."""
-    n = min(len(gt), len(est))
-    gt, est = gt[:n], est[:n]
+    gt, est = validate_pair(gt, est)
+    n = len(gt)
     gt_rel = evaluate.align_to_first_pose(gt)
     est_rel = evaluate.align_to_first_pose(est)
     m_unaligned = evaluate.compute_ape_rpe(gt_rel, est_rel)
     m_aligned = aligned_ape(gt_rel, est_rel)
-    m_kitti = kitti_drift(gt_rel, est_rel)
+    m_kitti = kitti_drift(gt_rel, est_rel, source_frame_ids=source_frame_ids)
     return {
         "n_frames": n,
         "path_length_m": path_length(gt_rel),
@@ -178,24 +142,52 @@ def gt_from_summary(out_dir: str) -> Optional[List[np.ndarray]]:
     gt = real_dataset.load_gt_poses(
         os.path.join(root, "dataset", "poses", f"{seq}.txt"),
         os.path.join(root, "dataset", "sequences", seq, "calib.txt"),
-        start=cfg.get("real_start", 0), end=cfg.get("real_end"),
+        start=0, end=None,
         apply_calib=cfg.get("real_apply_calib", False))
-    return list(gt)
+    ids, _ = offline_frame_ids(out_dir, cfg, len(gt))
+    return list(np.asarray(gt)[ids])
+
+
+def offline_frame_ids(out_dir, cfg, n_gt):
+    path = os.path.join(out_dir, "source_frames.json")
+    if os.path.exists(path):
+        manifest = json.load(open(path))
+        ids = validate_ids(manifest["source_frame_ids"])
+        if manifest.get("timestamps") is not None:
+            validate_stamps(manifest["timestamps"], len(ids))
+        binding = "persisted_source_frame_ids"
+    else:
+        start, end, stride = cfg.get("real_start", 0), cfg.get("real_end"), cfg.get("real_stride", 1)
+        if not isinstance(stride, int) or stride < 1 or start < 0:
+            raise ValueError("Invalid legacy frame selection")
+        ids = validate_ids(np.arange(start, n_gt if end is None else end + 1, stride))
+        binding = "legacy_config_assumed_complete"
+    if ids[-1] >= n_gt:
+        raise ValueError("Frame ID outside GT table")
+    return ids, binding
 
 
 def gt_for_live(source: str, seq: str, n: int) -> List[np.ndarray]:
-    """GT for a live run: KITTI seq or a POSS segment, truncated to n frames."""
+    """GT for an explicitly assumed contiguous live prefix (legacy helper)."""
+    if n <= 0:
+        raise ValueError("Live frame count must be positive")
     if source == "kitti":
         gt = real_dataset.load_gt_poses(
             os.path.join(KITTI_ROOT, "poses", f"{seq}.txt"),
             os.path.join(KITTI_ROOT, "sequences", seq, "calib.txt"),
             start=0, end=n - 1, apply_calib=True)
-    else:  # poss
-        start, _ = POSS_SEGMENTS[seq]
+    elif source == "poss":
+        start, end = POSS_SEGMENTS[seq]
+        if n > end - start + 1:
+            raise ValueError("Requested live prefix exceeds POSS segment")
         gt = real_dataset.load_gt_poses(
             os.path.join(POSS_ROOT, "poses", "00.txt"),
             os.path.join(POSS_ROOT, "sequences", "00", "calib.txt"),
             start=start, end=start + n - 1, apply_calib=False)
+    else:
+        raise ValueError(f"Unknown live source: {source}")
+    if len(gt) != n:
+        raise ValueError("Requested live frame range exceeds GT")
     return list(gt)
 
 
@@ -246,24 +238,71 @@ def eval_offline(out_dir: str) -> Optional[Dict]:
     if gt is None:
         logger.warning(f"skip {out_dir}: cannot derive GT from summary.json")
         return None
-    result = {"kind": "offline", "dir": out_dir}
-    result["odometry"] = evaluate_pair(gt, load_kitti_format(odom_file))
+    cfg = json.load(open(os.path.join(out_dir, "summary.json")))["config"]
+    # GT selection has already checked the full table bounds.
+    frame_path = os.path.join(out_dir, "source_frames.json")
+    if os.path.exists(frame_path):
+        ids = validate_ids(json.load(open(frame_path))["source_frame_ids"], len(gt))
+        binding = "persisted_source_frame_ids"
+    else:
+        ids = cfg.get("real_start", 0) + np.arange(len(gt)) * cfg.get("real_stride", 1)
+        binding = "legacy_config_assumed_complete"
+    result = {"kind": "offline", "dir": out_dir, "frame_binding": binding,
+              "source_frame_ids": ids.tolist(), "ape_reference": "lidar"}
+    result["odometry"] = evaluate_pair(gt, load_kitti_format(odom_file), ids)
     if os.path.exists(opt_file):
-        result["pgo"] = evaluate_pair(gt, load_kitti_format(opt_file))
+        result["pgo"] = evaluate_pair(gt, load_kitti_format(opt_file), ids)
+    if cfg.get("real_apply_calib", False):
+        calib = os.path.join(cfg["real_root"], "dataset", "sequences", cfg["real_seq"], "calib.txt")
+        tr = real_dataset._read_calib_transform(calib)
+        tr_inv = np.linalg.inv(tr)
+        cam_gt = [tr @ p @ tr_inv for p in gt]
+        for name, path in [("odometry", odom_file), ("pgo", opt_file)]:
+            if name in result:
+                cam_est = [tr @ p @ tr_inv for p in load_kitti_format(path)]
+                result[name]["camera_kitti"] = kitti_drift(cam_gt, cam_est, source_frame_ids=ids)
     return result
 
 
 def eval_live(name: str, odom_tum: str, map_tum: str,
-              source: str, seq: str) -> Optional[Dict]:
+              source: str, seq: str, allow_legacy_index=False) -> Optional[Dict]:
     if not os.path.exists(odom_tum):
         logger.warning(f"skip {name}: no {odom_tum}")
         return None
-    odom = load_tum(odom_tum)
-    gt = gt_for_live(source, seq, len(odom))
-    result = {"kind": "live", "odom_file": odom_tum}
-    result["odometry"] = evaluate_pair(gt, odom)
+    stamps, odom = load_tum(odom_tum, return_timestamps=True)
+    manifest_path = odom_tum + ".frames.json"
+    if os.path.exists(manifest_path):
+        manifest = json.load(open(manifest_path))
+        ids = validate_ids(manifest["source_frame_ids"], len(odom))
+        expected = validate_stamps(manifest["timestamps"], len(odom))
+        if not np.allclose(stamps, expected, rtol=0, atol=1e-6):
+            raise ValueError("Live timestamps do not match frame manifest")
+        offset = POSS_SEGMENTS[seq][0] if source == "poss" else 0
+        if ids[0] < offset:
+            raise ValueError("Live source frame precedes selected segment")
+        gt = np.asarray(gt_for_live(source, seq, int(ids[-1] - offset + 1)))[ids - offset]
+        binding = "persisted_source_frame_ids"
+    elif allow_legacy_index:
+        gt = gt_for_live(source, seq, len(odom))
+        ids = np.arange(len(odom)) + (POSS_SEGMENTS[seq][0] if source == "poss" else 0)
+        binding = "legacy_index_assumption_not_verified"
+    else:
+        raise ValueError("Live source-frame manifest missing; explicit legacy-index opt-in required")
+    result = {"kind": "live", "odom_file": odom_tum, "frame_binding": binding,
+              "source_frame_ids": ids.tolist()}
+    result["odometry"] = evaluate_pair(gt, odom, ids)
     if os.path.exists(map_tum):
-        result["pgo"] = evaluate_pair(gt, load_tum(map_tum))
+        map_stamps, mapped = load_tum(map_tum, return_timestamps=True)
+        if len(map_stamps) != len(stamps) or not np.allclose(map_stamps, stamps, rtol=0, atol=1e-6):
+            raise ValueError("Odometry and map trajectory timestamps differ")
+        result["pgo"] = evaluate_pair(gt, mapped, ids)
+    if source == "kitti":
+        tr = real_dataset._read_calib_transform(os.path.join(KITTI_ROOT, "sequences", seq, "calib.txt"))
+        tr_inv = np.linalg.inv(tr)
+        cam_gt = [tr @ p @ tr_inv for p in gt]
+        for key, poses in [("odometry", odom), ("pgo", mapped if "pgo" in result else None)]:
+            if poses is not None:
+                result[key]["camera_kitti"] = kitti_drift(cam_gt, [tr @ p @ tr_inv for p in poses], source_frame_ids=ids)
     return result
 
 
@@ -279,7 +318,7 @@ FIELDS = [("n_frames", "{:d}"), ("path_length_m", "{:.0f}"),
 def md_table(results: Dict[str, Dict], title: str) -> str:
     lines = [f"### {title}", "",
              "| dataset | traj | n | path [m] | APE unaligned [m] "
-             "| **APE aligned [m]** | KITTI ter [%] | rer [deg/100m] |",
+             "| **APE aligned [m]** | LiDAR ter [%] | LiDAR rer [deg/100m] |",
              "|---|---|---|---|---|---|---|---|"]
     for name, res in results.items():
         for traj in ("odometry", "pgo"):
@@ -295,7 +334,10 @@ def md_table(results: Dict[str, Dict], title: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="output_paper_metrics")
+    parser.add_argument("--allow-legacy-live-index", action="store_true")
+    parser.add_argument("--offline-only", action="store_true", help="Evaluate the offline core without legacy live products")
     args = parser.parse_args()
+    os.makedirs(args.out, exist_ok=False)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     offline, live = {}, {}
@@ -312,9 +354,9 @@ def main() -> None:
                 logger.info(f"   PGO  aligned APE "
                             f"{r['pgo']['ape_aligned_rmse']:.3f} m, "
                             f"ter {r['pgo']['kitti_ter_pct']:.3f} %")
-    for name, odom_tum, map_tum, source, seq in LIVE_RUNS:
+    for name, odom_tum, map_tum, source, seq in ([] if args.offline_only else LIVE_RUNS):
         logger.info(f"== live {name}")
-        r = eval_live(name, odom_tum, map_tum, source, seq)
+        r = eval_live(name, odom_tum, map_tum, source, seq, args.allow_legacy_live_index)
         if r:
             live[name] = r
 
@@ -327,7 +369,7 @@ def main() -> None:
                        "unaligned_ape": "first-pose anchoring only (our "
                                         "running convention, matches "
                                         "summary.json)",
-                       "kitti": "official relative drift, 100-800 m "
+                       "kitti": "KITTI-style all-segment relative drift, 100-800 m "
                                 "subsegments, start step 10 frames",
                        "gt": "KITTI apply_calib=True; POSS "
                              "apply_calib=False, segA offset 3850"}}
@@ -338,7 +380,7 @@ def main() -> None:
     md = ["# RAP-SLAM paper metrics draft", "",
           "Aligned APE = evo `--align` convention (comparable to literature "
           "ATE RMSE). Unaligned APE = our running convention (first-pose "
-          "anchoring). KITTI ter/rer = official relative drift "
+          "anchoring). KITTI ter/rer = KITTI-style all-segment relative drift "
           "(100–800 m subsegments).", ""]
     md.append(md_table(offline, "Offline pipeline products"))
     md.append(md_table(live, "ROS 2 live products"))

@@ -19,6 +19,9 @@ the pose of scan b expressed in scan a's frame (maps points from frame b into
 frame a) — the same convention as GTSAM BetweenFactor measurements.
 """
 
+from .rap_precision import precise_registration
+from .runtime_paths import backend_paths
+
 import logging
 import os
 import sys
@@ -50,7 +53,7 @@ class RAPBackend:
 
     def __init__(
         self,
-        rap_root: str = "/mnt/e/githouse/RAP-main",
+        rap_root: Optional[str] = None,
         ckpt_path: Optional[str] = None,
         spinnet_ckpt: Optional[str] = None,
         sampling_steps: int = 5,
@@ -61,6 +64,8 @@ class RAPBackend:
         feature_extraction_on: bool = True,
         seed: int = 42,
     ):
+        rap_root, ckpt_path, spinnet_ckpt = backend_paths(
+            rap_root, ckpt_path, spinnet_ckpt, feature_extraction_on)
         _setup_rap_imports(rap_root)
         self.rap_root = rap_root
         self.ckpt_path = ckpt_path or os.path.join(rap_root, "weights", "rap_model_12.ckpt")
@@ -77,8 +82,8 @@ class RAPBackend:
         import hydra
         from rectified_point_flow.utils import load_checkpoint_for_module
 
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        # Matmul precision is scoped to each registration; do not mutate it here.
+        # Preserve the caller's cuDNN policy.
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
 
@@ -210,6 +215,7 @@ class RAPBackend:
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
+    @precise_registration
     def register(self, points_a: np.ndarray, points_b: np.ndarray,
                  return_registered: bool = False):
         """Register two unposed scans.
@@ -303,7 +309,7 @@ class RAPBackend:
     # Multi-generation consistency verification (RC-3, 2026-08-08).
     # ------------------------------------------------------------------
     def register_consistent(self, points_a: np.ndarray, points_b: np.ndarray,
-                            k: int = 3):
+                            k: int = 3, generation_callback=None):
         """Register the same pair k times and measure cross-generation
         consistency. RAP sampling is stochastic; TRUE loops reproduce
         across generations (min overlap 0.66-0.98 on KITTI-02) while FALSE
@@ -312,10 +318,14 @@ class RAPBackend:
         best-of-k result (max overlap, tie -> min mean_dist) with added
         diagnostics: overlap_min, overlap_all, mean_dist_all, disp_t (m),
         disp_r (deg). See scripts/eval_multigen_confidence.py."""
+        if not isinstance(k, int) or k < 1:
+            raise ValueError("k must be a positive integer")
         Ts, ovs, mds = [], [], []
         t_infer = t_total = 0.0
-        for _ in range(int(k)):
+        for generation_id in range(k):
             T_rel, diag = self.register(points_a, points_b)
+            if generation_callback is not None:
+                generation_callback(generation_id, T_rel, diag)
             Ts.append(T_rel)
             ovs.append(float(diag["overlap_ratio"]))
             mds.append(float(diag["mean_dist"]))
@@ -338,6 +348,7 @@ class RAPBackend:
             "disp_t": float(np.mean(dt)) if dt else 0.0,
             "disp_r": float(np.mean(dr)) if dr else 0.0,
             "n_generations": int(k),
+            "selected_generation": best,
             "t_preprocess": 0.0,
             "t_inference": t_infer,
             "t_total": t_total,
@@ -347,6 +358,7 @@ class RAPBackend:
     # ------------------------------------------------------------------
     # N-way joint registration (RAP's native multi-part capability).
     # ------------------------------------------------------------------
+    @precise_registration
     def register_multi(self, scans_points: list,
                        max_points_per_scan: Optional[int] = None):
         """Jointly register N unposed scans in a single RAP call.

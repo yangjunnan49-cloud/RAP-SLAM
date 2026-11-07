@@ -287,8 +287,8 @@ def optimize_pose_graph(
         ks = [lc["clique_size"] for lc in loop_constraints]
         logger.info(f"Loop-edge clique down-weighting (w="
                     f"{loop_clique_width}, mode={loop_clique_mode}): "
-                    f"{len(ks)} edges, clique sizes max {max(ks)}, "
-                    f"mean {np.mean(ks):.1f}")
+                    f"{len(ks)} edges, clique sizes max {max(ks, default=0)}, "
+                    f"mean {np.mean(ks) if ks else 0.0:.1f}")
     for lc in loop_constraints:
         i, j = lc["i"], lc["j"]
         if i not in kf_set or j not in kf_set:

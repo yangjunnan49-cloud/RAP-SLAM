@@ -3,14 +3,14 @@
 
 Stages:
   1. Simulate a closed-loop scan sequence from a real aggregated map.
-  2. KISS-ICP frame-to-frame odometry (Open3D ICP fallback).
+  2. KISS-ICP frame-to-frame odometry (explicit optional Open3D ICP fallback).
   3. Keyframe selection by displacement.
   4. Loop-closure candidates by odometry proximity + RAP verification.
   5. GTSAM pose-graph optimization.
   6. evo APE/RPE evaluation, trajectory plot, merged map.
 
-Run inside WSL:
-  python scripts/run_pipeline.py --output /mnt/e/githouse/RAP-SLAM/output
+Portable launcher: RAP-main/scripts/run.py slam (plan/check by default).
+Direct entry: python /path/to/RAP-SLAM/scripts/run_pipeline.py --output /new/output
 """
 
 import argparse
@@ -19,134 +19,23 @@ import logging
 import os
 import sys
 import time
-
-import numpy as np
+import uuid
+import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rap_slam import (evaluate, keyframes as kf_mod, loop_closure, odometry,
-                      pose_graph, real_dataset, scan_context as sc_mod,
-                      sequence, spires_dataset)
+from rap_slam.cli import parse_args
+from rap_slam.runtime_paths import validate_pipeline_paths
 
 logger = logging.getLogger("run_pipeline")
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description="RAP-SLAM offline SLAM pipeline")
-    p.add_argument("--map", default="/mnt/e/githouse/RAP-main/demo_example_data/map_kitti/kitti00.ply")
-    p.add_argument("--rap-root", default="/mnt/e/githouse/RAP-main")
-    p.add_argument("--output", default="/mnt/e/githouse/RAP-SLAM/output")
-    p.add_argument("--n-poses", type=int, default=100)
-    p.add_argument("--radius", type=float, default=80.0)
-    p.add_argument("--center", type=float, nargs=2, default=[250.0, -30.0])
-    p.add_argument("--sensor-range", type=float, default=50.0)
-    p.add_argument("--points-range", type=int, nargs=2, default=[2000, 4000])
-    p.add_argument("--noise-sigma", type=float, default=0.05)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--kf-trans", type=float, default=6.0, help="keyframe translation threshold (m)")
-    p.add_argument("--kf-rot", type=float, default=12.0, help="keyframe rotation threshold (deg)")
-    p.add_argument("--loop-dist", type=float, default=15.0, help="loop candidate distance threshold (m)")
-    p.add_argument("--loop-sep", type=int, default=5, help="loop candidate min scan separation")
-    p.add_argument("--max-candidates", type=int, default=12)
-    p.add_argument("--loop-method", choices=["proximity", "sc", "both"], default="both",
-                   help="loop-candidate retrieval: odometry proximity, "
-                        "Scan Context global place recognition, or both merged")
-    p.add_argument("--sc-dist-thresh", type=float, default=0.25,
-                   help="Scan Context distance acceptance threshold")
-    p.add_argument("--sc-max-radius", type=float, default=80.0)
-    p.add_argument("--sc-rings", type=int, default=20)
-    p.add_argument("--sc-sectors", type=int, default=60)
-    p.add_argument("--sc-shortlist", type=int, default=10,
-                   help="ring-key shortlist size per query")
-    p.add_argument("--rap-steps", type=int, default=5, help="RAP inference sampling steps")
-    p.add_argument("--rap-max-points", type=int, default=4000)
-    p.add_argument("--rap-voxel", type=float, default=0.4)
-    p.add_argument("--trans-consistency", type=float, default=5.0)
-    p.add_argument("--rot-consistency", type=float, default=25.0)
-    p.add_argument("--min-overlap", type=float, default=0.7)
-    p.add_argument("--max-mean-dist", type=float, default=2.5,
-                   help="loop acceptance: max mean symmetric NN distance (m); 0 disables")
-    # RC-3 (2026-08-08): optional multi-generation consistency gate
-    # (eval_multigen_confidence.py). k=1 keeps the single-generation gate.
-    p.add_argument("--multigen-k", type=int, default=1,
-                   help="RAP generations per candidate; >1 switches the gate "
-                        "to cross-generation consistency (overlap_min, disp_r)")
-    p.add_argument("--min-overlap-min", type=float, default=0.4,
-                   help="multigen gate: min overlap across generations")
-    p.add_argument("--max-disp-r", type=float, default=30.0,
-                   help="multigen gate: max inter-generation rotation "
-                        "dispersion (deg); catches bistable yaw flips")
-    # S1a arm (2026-09-05, output_s1/s1_report.md): conformal acceptance
-    # gate with a finite-sample false-accept bound (alpha=0.05). Default
-    # "heuristic" keeps the two-metric gate (canonical goldens unchanged).
-    p.add_argument("--gate-mode", choices=["heuristic", "conformal"],
-                   default="heuristic",
-                   help="conformal = ConformalGate A1 (data/conformal_gate/"
-                        "A1.json) decides acceptance from overlap+mean_dist")
-    p.add_argument("--gate-model", default=None,
-                   help="explicit ConformalGate JSON path (overrides the "
-                        "default A1 model when --gate-mode conformal)")
-    # RAP-CORE PGO (2026-08-01): floor-relative adaptive sigmas from RAP
-    # mean_dist + Huber; best cross-dataset combo (eval_pgo_robust.py:
-    # KITTI-02 27.387 -> 26.423 m, POSS bit-identical 1.757 m).
-    p.add_argument("--loop-weighting", choices=["fixed", "adaptive", "relfloor"],
-                   default="relfloor",
-                   help="fixed: uniform loop sigmas; adaptive: absolute sigmas "
-                        "from mean_dist; relfloor: loosen only edges sloppier "
-                        "than --relfloor-ref (cross-dataset safe)")
-    p.add_argument("--relfloor-ref", type=float, default=1.0,
-                   help="reference RAP mean_dist (m) for relfloor weighting")
-    p.add_argument("--relfloor-cap", type=float, default=3.0,
-                   help="max sigma loosening factor for relfloor weighting")
-    p.add_argument("--loop-nms-width", type=float, default=0.0,
-                   help="(i,j)-space NMS width (scans) on accepted loop edges "
-                        "before PGO; 0 = off. Live default is 10 (dense "
-                        "same-site clusters); offline is budget-capped, so "
-                        "off keeps the golden regressions bit-exact")
-    p.add_argument("--robust-kernel", choices=["none", "huber", "dcs"],
-                   default="huber", help="robust mEstimator on loop edges")
-    p.add_argument("--huber-k", type=float, default=1.0)
-    p.add_argument("--dcs-phi", type=float, default=10.0)
-    p.add_argument("--no-rap-features", action="store_true",
-                   help="disable miniSpinNet features (zero features)")
-    p.add_argument("--force-regenerate", action="store_true")
-    p.add_argument("--skip-loop-closure", action="store_true")
-    # --- real sequence (KITTI-format: KITTI odometry / POSS) ---
-    p.add_argument("--source", choices=["sim", "real", "spires"], default="sim",
-                   help="sim = simulated sequence from an aggregated map; "
-                        "real = KITTI-format dataset segment; "
-                        "spires = Oxford Spires (Hesai QT64) sequence")
-    p.add_argument("--real-root", default="/mnt/e/githouse/RAP-SLAM/data/poss",
-                   help="dataset root with dataset/poses and dataset/sequences")
-    p.add_argument("--real-seq", default="00")
-    p.add_argument("--real-start", type=int, default=3850)
-    p.add_argument("--real-end", type=int, default=5268)
-    p.add_argument("--real-stride", type=int, default=1)
-    p.add_argument("--real-apply-calib", action="store_true",
-                   help="apply Tr velo<->cam conversion (KITTI convention; "
-                        "POSS poses are already in the LiDAR/world frame)")
-    p.add_argument("--apply-kitti-205", action="store_true",
-                   help="apply the 0.205-deg HDL-64 intrinsic vertical-angle "
-                        "correction (CT-ICP/MULLS/Traj-LO KITTI convention); "
-                        "only legal together with --real-apply-calib")
-    # --- Oxford Spires (P4 cross-sensor zero-shot) ---
-    p.add_argument("--spires-root",
-                   default="/mnt/e/githouse/Datasets/oxford_spires",
-                   help="root with sequences/<seq>/raw/lidar-clouds/*.pcd "
-                        "and gt/<seq>.txt")
-    p.add_argument("--spires-seq", default="2024-03-12-keble-college-02")
-    p.add_argument("--spires-start", type=int, default=0)
-    p.add_argument("--spires-end", type=int, default=None)
-    p.add_argument("--odom-max-range", type=float, default=80.0)
-    p.add_argument("--deskew", action="store_true",
-                   help="synthesize per-point azimuth timestamps and enable "
-                        "KISS-ICP motion compensation (real spinning-LiDAR "
-                        "scans only; simulated scans have no distortion)")
-    return p.parse_args()
 
 
 def get_sequence(args):
     """Load cached sequence, generate a simulated one, or load a real segment."""
+    import numpy as np
+    from rap_slam import real_dataset, sequence, spires_dataset
     if getattr(args, "source", "sim") == "spires":
         logger.info(f"Loading Oxford Spires {args.spires_seq} from "
                     f"{args.spires_root} scans [{args.spires_start}:"
@@ -160,15 +49,24 @@ def get_sequence(args):
                     f"frames [{args.real_start}:{args.real_end}] stride={args.real_stride}")
         kitti205 = bool(getattr(args, "apply_kitti_205", False))
         if kitti205 and not getattr(args, "real_apply_calib", False):
-            raise ValueError("--apply-kitti-205 is only legal for KITTI "
-                             "odometry (requires --real-apply-calib); never "
-                             "apply it to POSS or other sensors")
+            # [meeting-20260921] the correction is now on by default on this
+            # branch; auto-disable it for non-KITTI conventions (POSS etc.)
+            # instead of raising, so existing POSS commands keep working.
+            logger.info("auto-disabling --apply-kitti-205 (no --real-apply-calib)")
+            kitti205 = False
         data = real_dataset.load_real_sequence(
             args.real_root, sequence_id=args.real_seq,
             start=args.real_start, end=args.real_end,
-            min_range=1.5, stride=args.real_stride,
+            min_range=getattr(args, "odom_min_range", 1.5),  # [meeting-20260921] was hard-coded 1.5
+            stride=args.real_stride,
             apply_calib=getattr(args, "real_apply_calib", False),
             kitti205=kitti205)
+        manifest = {"source_frame_ids": data["source_frame_ids"],
+                    "timestamps": data["timestamps"], "scan_files": data["scan_files"],
+                    "source": "real", "sequence": args.real_seq,
+                    "pose_reference": "lidar"}
+        with open(os.path.join(args.output, "source_frames.json"), "w") as f:
+            json.dump(manifest, f, indent=2)
         return data["gt_poses"], data["scans"]
     seq_dir = os.path.join(args.output, "sequence")
     gt_file = os.path.join(seq_dir, "gt_poses.txt")
@@ -204,7 +102,20 @@ def get_sequence(args):
 
 def main():
     args = parse_args()
-    os.makedirs(args.output, exist_ok=True)
+    errors = validate_pipeline_paths(args)
+    if errors:
+        raise SystemExit("Path preflight failed:\n" + "\n".join(errors))
+    import numpy as np
+    from rap_slam import (evaluate, keyframes as kf_mod, loop_closure, odometry,
+                          pose_graph, scan_context as sc_mod, sequence)
+
+    os.makedirs(args.output, exist_ok=False)
+    run_id = str(uuid.uuid4())
+    incomplete = os.path.join(args.output,"INCOMPLETE")
+    with open(incomplete,"w") as f:
+        f.write(run_id + "\n")
+    with open(os.path.join(args.output,"run_manifest.json"),"w") as f:
+        json.dump({"run_id":run_id,"config":vars(args)},f,indent=2)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
                         datefmt="%H:%M:%S")
@@ -227,7 +138,10 @@ def main():
     t0 = time.time()
     odom_poses, backend_name = odometry.run_odometry(
         scans, max_range=getattr(args, "odom_max_range", 80.0),
-        deskew=getattr(args, "deskew", False))
+        deskew=getattr(args, "deskew", False),
+        allow_fallback=args.allow_odom_fallback,
+        min_range=getattr(args, "odom_min_range", 1.5),  # [meeting-20260921]
+        voxel_size=getattr(args, "odom_voxel", 0.8))  # [meeting-20260921]
     sequence.save_kitti_poses(np.stack(odom_poses),
                               os.path.join(args.output, "odom_poses.txt"))
     timings["odometry"] = time.time() - t0
@@ -244,6 +158,22 @@ def main():
     logger.info("STAGE 4: loop closure (candidates + RAP verification)")
     accepted = []
     candidates = []
+    from rap_slam.verification_log import VerificationLog
+    frame_path = os.path.join(args.output,"source_frames.json")
+    if args.source == "real":
+        with open(frame_path) as f:
+            source_ids = json.load(f)["source_frame_ids"]
+        dataset_id = "kitti" if args.real_apply_calib else "poss"
+        sequence_id = args.real_seq
+        frame_binding = "source_frames.json"
+    else:
+        source_ids = list(range(n))
+        dataset_id, sequence_id = args.source, run_id
+        frame_binding = "run_local_only"
+    measurement_log = VerificationLog(os.path.join(args.output,"verification_measurements.jsonl"),
+        run_id,dataset_id,sequence_id,source_ids,gt_poses,
+        provenance={"frame_binding":frame_binding,"root_seed":args.seed,
+                    "per_generation_seed":None,"seed_policy":"backend_shared_rng_in_recorded_order"})
     t0 = time.time()
     if not args.skip_loop_closure:
         prox_pairs, sc_pairs = [], []
@@ -264,11 +194,28 @@ def main():
         if candidates:
             from rap_slam.rap_backend import RAPBackend
             rap = RAPBackend(rap_root=args.rap_root,
+                             ckpt_path=args.rap_ckpt,
+                             spinnet_ckpt=args.spinnet_ckpt,
                              sampling_steps=args.rap_steps,
                              voxel_size=args.rap_voxel,
                              max_points_per_scan=args.rap_max_points,
                              feature_extraction_on=not args.no_rap_features,
                              seed=args.seed)
+            def file_sha(path):
+                digest = hashlib.sha256()
+                with open(path,"rb") as f:
+                    for block in iter(lambda:f.read(1024*1024),b""):
+                        digest.update(block)
+                return digest.hexdigest()
+            provenance = {"checkpoint_sha256":file_sha(rap.ckpt_path),
+                          "spinnet_sha256":file_sha(rap.spinnet_ckpt) if rap.feature_extraction_on else None,
+                          "precision":"ieee_float32_matmul_scope",
+                          "source_sha256":{name:file_sha(os.path.join(os.path.dirname(__file__),"..",name))
+                            for name in ["rap_slam/rap_backend.py","rap_slam/verification_log.py",
+                                         "rap_slam/measurement.py","rap_slam/loop_closure.py","scripts/run_pipeline.py"]}}
+            with open(os.path.join(args.output,"inference_provenance.json"),"w") as f:
+                json.dump(provenance,f,indent=2)
+            measurement_log.provenance.update(provenance)
             gate_model = None
             if args.gate_mode == "conformal":
                 from rap_slam.conformal_gate import ConformalGate
@@ -289,7 +236,7 @@ def main():
                 min_overlap_min=args.min_overlap_min,
                 max_disp_r=args.max_disp_r,
                 gt_poses=gt_poses,
-                gate_model=gate_model)
+                gate_model=gate_model,measurement_log=measurement_log)
         else:
             logger.info("No loop candidates found")
     timings["loop_closure"] = time.time() - t0
@@ -306,6 +253,12 @@ def main():
                         else int(v) if isinstance(v, np.integer)
                         else v)
                     for k, v in lc.items()} for lc in accepted], f)
+
+    verification_counts = measurement_log.summary()
+    with open(os.path.join(args.output,"verification_summary.json"),"w") as f:
+        json.dump(verification_counts,f,indent=2)
+    if verification_counts["failed"] or verification_counts["started"]:
+        raise RuntimeError("Incomplete candidate verification; evidence saved, research run is not complete")
 
     # ------------------------------------------------------------ 5. PGO
     logger.info("=" * 70)
@@ -359,6 +312,8 @@ def main():
     total = time.time() - t_start
     summary = {
         "config": {k: v for k, v in vars(args).items()},
+        "run_id": run_id,
+        "verification_counts": verification_counts,
         "n_scans": n,
         "n_keyframes": len(keyframes),
         "odometry_backend": backend_name,
@@ -382,6 +337,7 @@ def main():
         json.dump(summary, f, indent=2)
 
     logger.info("=" * 70)
+    os.remove(incomplete)
     logger.info(f"DONE in {total:.1f} s. Summary written to {args.output}/summary.json")
     print("\n===== RAP-SLAM SUMMARY =====")
     print(json.dumps({k: summary[k] for k in

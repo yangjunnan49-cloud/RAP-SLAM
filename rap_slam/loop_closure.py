@@ -5,6 +5,7 @@ import time
 from typing import List, Tuple
 
 import numpy as np
+from .verification_log import RecordingError
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
                       min_overlap_min: float = 0.4,
                       max_disp_r: float = 30.0,
                       gt_poses: np.ndarray = None,
-                      gate_model=None) -> List[dict]:
+                      gate_model=None, measurement_log=None) -> List[dict]:
     """Verify loop candidates with RAP 2-way registration.
 
     A candidate (i, j) is accepted when the scans actually align after RAP
@@ -116,14 +117,24 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
     """
     accepted = []
     for (i, j) in pairs:
+        attempt = measurement_log.start(i,j) if measurement_log is not None else None
+        def capture(generation_id, transform, diagnostics):
+            measurement_log.generation(attempt, generation_id, transform, diagnostics)
         t0 = time.time()
         try:
             if multigen_k > 1:
+                callback = {"generation_callback": capture} if measurement_log is not None else {}
                 T_rel, diag = rap_backend.register_consistent(
-                    scans[i], scans[j], k=multigen_k)
+                    scans[i], scans[j], k=multigen_k, **callback)
             else:
                 T_rel, diag = rap_backend.register(scans[i], scans[j])
+                if measurement_log is not None:
+                    capture(0,T_rel,diag)
+        except RecordingError:
+            raise
         except Exception as e:
+            if measurement_log is not None:
+                measurement_log.failure(attempt,e)
             logger.warning(f"RAP failed for pair ({i}, {j}): {e}")
             continue
 
@@ -155,7 +166,9 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
         # flips) while true loops reproduce (min overlap >= 0.66), so
         # min_overlap_min=0.4 has a huge two-sided margin vs the
         # single-generation gate's 0.06.
+        gate_used = "heuristic"
         if multigen_k > 1:
+            gate_used = "multigen_consistency"
             ok = (diag["overlap_min"] >= min_overlap_min and
                   (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist) and
                   diag["disp_r"] <= max_disp_r)
@@ -170,10 +183,12 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
             # falls back to the heuristic gate.
             s = gate_model.score({"overlap": overlap, "mean_dist": mean_dist})
             if s is None:
+                gate_used = "heuristic_fallback_missing_conformal_features"
                 ok = (overlap >= min_overlap and
                       (max_mean_dist <= 0.0 or mean_dist <= max_mean_dist))
                 msg += " | conformal n/a (heuristic fallback)"
             else:
+                gate_used = "conformal_legacy_optional"
                 ok = s < gate_model.Q
                 msg += (f" | conformal danger={s:.3f} "
                         f"Q={gate_model.Q:.3f}")
@@ -183,6 +198,10 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
         msg += " => ACCEPT" if ok else " => reject"
         logger.info(msg)
 
+        selected_id = None
+        if measurement_log is not None:
+            selected_id = measurement_log.decision(attempt, int(diag.get("selected_generation",0)),
+                                                   bool(ok), gate_used, T_rel, diag)
         if ok:
             entry = {
                 "i": i, "j": j, "T_rel": T_rel,
@@ -192,6 +211,8 @@ def verify_candidates(pairs: List[Tuple[int, int]], scans: List[np.ndarray],
                 "t_infer": diag["t_inference"],
                 "t_total": time.time() - t0,
             }
+            if selected_id is not None:
+                entry["measurement_id"] = selected_id
             if multigen_k > 1:
                 entry.update({
                     "overlap_min": diag["overlap_min"],

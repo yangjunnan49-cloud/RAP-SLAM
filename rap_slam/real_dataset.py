@@ -14,6 +14,7 @@ import os
 from typing import List, Optional, Tuple
 
 import numpy as np
+from .trajectory_protocol import validate_ids, validate_stamps
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +97,27 @@ def load_scans(velodyne_dir: str, start: int = 0, end: Optional[int] = None,
     Selection is by absolute frame number, matching the GT pose indexing —
     the directory may hold only a segment of the full recording.
     """
-    files = sorted(glob.glob(os.path.join(velodyne_dir, "*.bin")))
-    end_idx = int(os.path.splitext(os.path.basename(files[-1]))[0]) if end is None else end
-    selected = [p for p in files
-                if start <= int(os.path.splitext(os.path.basename(p))[0]) <= end_idx]
+    if not isinstance(stride, int) or stride < 1 or start < 0:
+        raise ValueError("start must be nonnegative and stride must be a positive integer")
+    files = glob.glob(os.path.join(velodyne_dir, "*.bin"))
+    by_id = {}
+    for path in files:
+        frame = int(os.path.splitext(os.path.basename(path))[0])
+        if frame in by_id:
+            raise ValueError(f"Duplicate source frame {frame}")
+        by_id[frame] = path
+    if not by_id:
+        raise ValueError(f"No scans in {velodyne_dir}")
+    end_idx = max(by_id) if end is None else end
+    if end_idx < start:
+        raise ValueError("Empty or reversed source frame range")
+    selected_ids = range(start, end_idx + 1, stride)
+    missing = [i for i in selected_ids if i not in by_id]
+    if missing:
+        raise ValueError(f"Missing requested source frames: {missing[:10]}")
+    selected = [by_id[i] for i in selected_ids]
     scans, used = [], []
-    for path in selected[::stride]:
+    for path in selected:
         pts = np.fromfile(path, dtype=np.float32).reshape(-1, 4)[:, :3]
         if min_range > 0.0 or max_range > 0.0:
             r = np.linalg.norm(pts, axis=1)
@@ -146,15 +162,23 @@ def load_real_sequence(root: str, sequence_id: str = "00",
     calib_file = os.path.join(seq_dir, "calib.txt")
     velodyne_dir = os.path.join(seq_dir, "velodyne")
 
-    gt_poses = load_gt_poses(poses_file, calib_file, start=start, end=end,
+    gt_poses = load_gt_poses(poses_file, calib_file, start=0, end=None,
                              apply_calib=apply_calib)
     scans, scan_files = load_scans(velodyne_dir, start=start, end=end,
                                    min_range=min_range, max_range=max_range,
                                    stride=stride, kitti205=kitti205)
-    if stride > 1:
-        gt_poses = gt_poses[::stride]
-    assert len(gt_poses) == len(scans), \
-        f"pose/scan count mismatch: {len(gt_poses)} vs {len(scans)}"
+    source_frame_ids = validate_ids([int(os.path.splitext(os.path.basename(p))[0]) for p in scan_files])
+    if source_frame_ids[-1] >= len(gt_poses):
+        raise ValueError("Source frame outside GT pose table")
+    gt_poses = gt_poses[source_frame_ids]
+    timestamps = None
+    times_file = os.path.join(seq_dir, "times.txt")
+    if os.path.exists(times_file):
+        all_times = validate_stamps(np.atleast_1d(np.loadtxt(times_file)))
+        if source_frame_ids[-1] >= len(all_times):
+            raise ValueError("Source frame outside timestamp table")
+        timestamps = all_times[source_frame_ids].tolist()
     logger.info(f"Real sequence: {len(scans)} frames "
                 f"(GT from {poses_file}, converted to velodyne frame)")
-    return {"gt_poses": gt_poses, "scans": scans, "scan_files": scan_files}
+    return {"gt_poses": gt_poses, "scans": scans, "scan_files": scan_files,
+            "source_frame_ids": source_frame_ids.tolist(), "timestamps": timestamps}
